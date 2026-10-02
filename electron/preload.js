@@ -43,7 +43,7 @@ const INVOKE_CHANNELS = [
  * Maps to win.webContents.send() calls in main.js.
  */
 const LISTEN_CHANNELS = [
-  // Future: 'chat:token', 'chat:done', 'system:status', etc.
+  'ollama:stream',   // Phase 7: streaming token chunks from Ollama → renderer
 ]
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -308,24 +308,29 @@ function buildSystemContent(profile, memories) {
 }
 
 /**
- * ollama:chat
+ * ollama:chat — Phase 7: streaming
  * Args: { conversationId: string, prompt: string }
  *
  * Flow:
- *   1. Validate inputs
- *   2. Verify the conversation exists in SQLite
- *   3. Retrieve business profile  — for system prompt BUSINESS PROFILE section
- *   4. Retrieve saved memories    — for system prompt BUSINESS MEMORY section (Phase 6)
- *   5. Retrieve prior messages    — current conversation context
- *   6. Save the new user message to SQLite
- *   7. Build Ollama payload: [system(profile+memories), ...history, user]
- *   8. POST to Ollama /api/chat
- *   9. Save assistant response to SQLite
- *  10. Return both saved messages
+ *   1.  Validate inputs + verify conversation exists
+ *   2.  Retrieve business profile, memories, conversation history (unchanged)
+ *   3.  Save the user message to SQLite
+ *   4.  Return { streaming: true, userMessage } immediately so the renderer
+ *       can replace its optimistic bubble with the real DB row right away
+ *   5.  POST to Ollama /api/chat with stream: true
+ *   6.  Read NDJSON chunks; push each token to the renderer via
+ *       event.sender.send('ollama:stream', { conversationId, chunk })
+ *   7.  When Ollama signals done, save the accumulated full response to SQLite
+ *       as a single assistant message
+ *   8.  Push { conversationId, done: true, userMessage, assistantMessage }
+ *       so the renderer can swap the live streaming bubble for the persisted row
  *
- * Returns: { userMessage, assistantMessage } | { error }
+ * On any error after the handler has already returned { streaming: true }:
+ *   Push { conversationId, done: true, error } so the renderer can display it.
+ *
+ * Returns: { streaming: true, userMessage } | { error }
  */
-ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) => {
+ipcMain.handle('ollama:chat', async (event, { conversationId, prompt } = {}) => {
   // ── Guards ──────────────────────────────────────────────────────────────
   if (!conversationId) return { error: 'conversationId is required.' }
   if (!prompt || typeof prompt !== 'string' || prompt.trim() === '') {
@@ -343,28 +348,25 @@ ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) =>
     profile = db.getProfile()
   } catch (err) {
     console.warn('[ipc] ollama:chat — failed to retrieve business profile:', err)
-    // Non-fatal: chat continues without profile context
   }
 
-  // ── Retrieve saved business memories (Phase 6) ───────────────────────────
+  // ── Retrieve saved business memories ────────────────────────────────────
   let memories = []
   try {
     memories = db.getRecentMemories(db.BUSINESS_ID_DEFAULT, MAX_MEMORIES)
   } catch (err) {
     console.warn('[ipc] ollama:chat — failed to retrieve memories:', err)
-    // Non-fatal: chat continues without memory context
   }
 
-  // ── Retrieve conversation history before saving the new prompt ───────────
+  // ── Retrieve conversation history ────────────────────────────────────────
   let previousMessages = []
   try {
     previousMessages = db.getRecentMessages(conversationId, MAX_CONTEXT_MESSAGES)
   } catch (err) {
     console.warn('[ipc] ollama:chat — failed to retrieve previous messages:', err)
-    // Non-fatal: proceed with current prompt only
   }
 
-  // ── Save user message ───────────────────────────────────────────────────
+  // ── Save user message ────────────────────────────────────────────────────
   let userMessage
   try {
     userMessage = db.saveMessage({
@@ -377,12 +379,8 @@ ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) =>
     return { error: `Failed to save message: ${err.message}` }
   }
 
-  // ── Build context payload for Ollama /api/chat ──────────────────────────
-  // One structured system message contains: base instructions + business
-  // profile + business memory.  Conversation history follows as normal
-  // user/assistant turns so the model sees a clean turn structure.
+  // ── Build Ollama payload ─────────────────────────────────────────────────
   const systemContent = buildSystemContent(profile, memories)
-
   const messagesPayload = [
     { role: 'system', content: systemContent },
     ...previousMessages.map(m => ({
@@ -392,64 +390,125 @@ ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) =>
     { role: 'user', content: trimmedPrompt },
   ]
 
-  // ── Call Ollama /api/chat ───────────────────────────────────────────────
-  let ollamaResponse
-  try {
-    const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: messagesPayload,
-        stream: false,
-        options: {
-          temperature: 0.3,
-        },
-      }),
-    })
+  // ── Return immediately so the renderer can display the user message ──────
+  // The rest of the work (streaming + saving) happens asynchronously.
+  // We use a self-invoking async function so the handle can return first.
+  ;(async () => {
+    // Helper: push a terminal event to the renderer so it always exits loading
+    const sendDone = (payload) => {
+      try {
+        event.sender.send('ollama:stream', { conversationId, done: true, ...payload })
+      } catch {
+        // Renderer may have been destroyed (window closed mid-stream) — ignore
+      }
+    }
+
+    let res
+    try {
+      res = await fetch(`${OLLAMA_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          messages: messagesPayload,
+          stream: true,
+          options: { temperature: 0.3 },
+        }),
+      })
+    } catch (err) {
+      if (err.cause?.code === 'ECONNREFUSED' || err.message?.includes('ECONNREFUSED')) {
+        return sendDone({ error: 'Ollama is not running. Start it with: ollama serve' })
+      }
+      return sendDone({ error: `Unexpected error: ${err.message}` })
+    }
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText)
       if (res.status === 404) {
-        return { error: `Model "${OLLAMA_MODEL}" not found. Run: ollama pull ${OLLAMA_MODEL}` }
+        return sendDone({ error: `Model "${OLLAMA_MODEL}" not found. Run: ollama pull ${OLLAMA_MODEL}` })
       }
-      return { error: `Ollama error ${res.status}: ${text}` }
+      return sendDone({ error: `Ollama error ${res.status}: ${text}` })
     }
 
-    const data = await res.json()
-    ollamaResponse = data.message?.content ?? ''
+    // ── Stream NDJSON chunks ─────────────────────────────────────────────
+    // Ollama sends newline-delimited JSON: one object per line, each with
+    // { message: { role, content }, done: false } until the final
+    // { message: { content: '' }, done: true, ... }.
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let accumulated = ''
+    let buffer = ''
 
-    // Guard: an empty response is treated as a failure so the user sees an
-    // error rather than a silent blank bubble.  This can happen when a very
-    // small model (gemma3:1b) is overwhelmed by a long system prompt.
-    if (ollamaResponse.trim() === '') {
-      return { error: 'Ollama returned an empty response. Try rephrasing your message.' }
-    }
-  } catch (err) {
-    if (err.cause?.code === 'ECONNREFUSED' || err.message?.includes('ECONNREFUSED')) {
-      return { error: 'Ollama is not running. Start it with: ollama serve' }
-    }
-    return { error: `Unexpected error: ${err.message}` }
-  }
+    try {
+      while (true) {
+        const { value, done: readerDone } = await reader.read()
+        if (readerDone) break
 
-  // ── Save assistant message ──────────────────────────────────────────────
-  let assistantMessage
-  try {
-    assistantMessage = db.saveMessage({
-      conversationId,
-      role: 'assistant',
-      content: ollamaResponse,
-    })
-  } catch (err) {
-    console.error('[ipc] ollama:chat — failed to save assistant message:', err)
-    // Return the response even if saving failed — don't lose it
-    return {
-      error: `Response received but failed to save: ${err.message}`,
-      response: ollamaResponse,
-    }
-  }
+        buffer += decoder.decode(value, { stream: true })
 
-  return { userMessage, assistantMessage }
+        // Process every complete newline-delimited JSON line in the buffer
+        const lines = buffer.split('\n')
+        // Keep the last (potentially incomplete) fragment in the buffer
+        buffer = lines.pop()
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+
+          let parsed
+          try {
+            parsed = JSON.parse(trimmed)
+          } catch {
+            console.warn('[stream] Could not parse Ollama line:', trimmed)
+            continue
+          }
+
+          const chunk = parsed.message?.content ?? ''
+          if (chunk) {
+            accumulated += chunk
+            // Push chunk to renderer — fire-and-forget, renderer accumulates
+            try {
+              event.sender.send('ollama:stream', { conversationId, chunk })
+            } catch {
+              // Renderer destroyed mid-stream
+              return
+            }
+          }
+
+          if (parsed.done) break
+        }
+      }
+    } catch (err) {
+      console.error('[stream] Error reading Ollama stream:', err)
+      return sendDone({ error: `Stream read error: ${err.message}` })
+    } finally {
+      reader.releaseLock()
+    }
+
+    // ── Empty-response guard ─────────────────────────────────────────────
+    if (accumulated.trim() === '') {
+      return sendDone({ error: 'Ollama returned an empty response. Try rephrasing your message.' })
+    }
+
+    // ── Save the complete assistant response as ONE SQLite message ────────
+    let assistantMessage
+    try {
+      assistantMessage = db.saveMessage({
+        conversationId,
+        role: 'assistant',
+        content: accumulated,
+      })
+    } catch (err) {
+      console.error('[stream] Failed to save assistant message:', err)
+      return sendDone({ error: `Response received but failed to save: ${err.message}` })
+    }
+
+    // ── Signal completion ────────────────────────────────────────────────
+    sendDone({ userMessage, assistantMessage })
+  })()
+
+  // Return to the renderer immediately with the saved user message
+  return { streaming: true, userMessage }
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

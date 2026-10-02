@@ -40,8 +40,20 @@ export default function App() {
   const [pinState, setPinState] = useState({})
   const [memoryError, setMemoryError] = useState('')
 
+  // ── Streaming state (Phase 7) ────────────────────────────────────────────
+  // streamingContent: the live text being accumulated from ollama:stream events
+  // streamingConvId:  which conversation is actively streaming (guards stale events)
+  const [streamingContent, setStreamingContent] = useState('')
+  const [streamingConvId, setStreamingConvId] = useState(null)
+
   // ── Bridge check + initial data load ────────────────────────────────────
   useEffect(() => {
+    // Inject the @keyframes rule for the streaming cursor blink (Phase 7).
+    // Done once here because inline styles cannot define keyframes.
+    const style = document.createElement('style')
+    style.textContent = '@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }'
+    document.head.appendChild(style)
+
     if (typeof window.confide === 'undefined') {
       setBridgeOk(false)
       return
@@ -119,7 +131,7 @@ export default function App() {
     await loadConversations()
   }
 
-  // ── Send prompt → Ollama ─────────────────────────────────────────────────
+  // ── Send prompt → Ollama (streaming, Phase 7) ───────────────────────────
   async function handleSend() {
     const trimmed = prompt.trim()
     if (!trimmed || !activeId || loading) return
@@ -127,32 +139,80 @@ export default function App() {
     setLoading(true)
     setError('')
     setPrompt('')
+    setStreamingContent('')
+    setStreamingConvId(activeId)
 
+    // Optimistic user bubble while the invoke round-trip completes
     const optimisticUser = { id: '__optimistic__', role: 'user', content: trimmed, created_at: new Date().toISOString() }
     setMessages(prev => [...prev, optimisticUser])
 
+    // Subscribe to streaming chunks BEFORE invoking so no early events are missed
+    const unsub = window.confide.on('ollama:stream', (data) => {
+      // Ignore events that belong to a different (stale) conversation
+      if (data.conversationId !== activeId) return
+
+      if (data.done) {
+        // Unsubscribe first — no more events needed
+        unsub()
+
+        setStreamingContent('')
+        setStreamingConvId(null)
+        setLoading(false)
+
+        if (data.error) {
+          setError(data.error)
+          // Remove the optimistic user bubble on failure
+          setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
+          return
+        }
+
+        // Swap optimistic bubble for real DB-persisted row, append assistant message
+        setMessages(prev => [
+          ...prev.filter(m => m.id !== '__optimistic__'),
+          data.userMessage,
+          data.assistantMessage,
+        ])
+        // Refresh sidebar — conversation updated_at changed
+        loadConversations()
+      } else if (data.chunk) {
+        // Append incoming token to the live streaming bubble
+        setStreamingContent(prev => prev + data.chunk)
+      }
+    })
+
     try {
+      // ollama:chat now returns { streaming: true, userMessage } immediately
       const result = await window.confide.invoke('ollama:chat', {
         conversationId: activeId,
         prompt: trimmed,
       })
 
       if (result.error) {
+        // Error returned synchronously (guards fired before streaming started)
+        unsub()
         setError(result.error)
+        setStreamingContent('')
+        setStreamingConvId(null)
+        setLoading(false)
         setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
-      } else {
+        return
+      }
+
+      // Replace the optimistic bubble with the real persisted user message
+      // (assistantMessage arrives later via the stream done event)
+      if (result.userMessage) {
         setMessages(prev => [
           ...prev.filter(m => m.id !== '__optimistic__'),
           result.userMessage,
-          result.assistantMessage,
         ])
-        await loadConversations()
       }
     } catch (err) {
+      unsub()
       setError(`IPC error: ${err.message}`)
-      setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
-    } finally {
+      setStreamingContent('')
+      setStreamingConvId(null)
       setLoading(false)
+      setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
     }
   }
 
@@ -514,10 +574,22 @@ export default function App() {
                 </div>
               ))}
 
+              {/* Loading / streaming bubble (Phase 7) */}
               {loading && (
                 <div style={s.assistantBubble}>
-                  <span style={s.roleAssistant}>gemma3:1b</span>
-                  <p style={{ ...s.msgText, color: '#6b7280' }}>Thinking…</p>
+                  <div style={s.bubbleHeader}>
+                    <span style={s.roleAssistant}>gemma3:1b</span>
+                  </div>
+                  <p style={s.msgText}>
+                    {streamingContent
+                      ? streamingContent          // live token accumulation
+                      : <span style={{ color: '#6b7280' }}>Thinking…</span>
+                    }
+                    {/* Blinking cursor shown while actively streaming */}
+                    {streamingContent && (
+                      <span style={s.streamCursor}>▋</span>
+                    )}
+                  </p>
                 </div>
               )}
 
@@ -925,6 +997,15 @@ const s = {
   pinBtnSaved: {
     color: '#34d399',
     opacity: 1,
+  },
+
+  // Phase 7: blinking cursor shown at the end of streaming text
+  streamCursor: {
+    display: 'inline-block',
+    width: '0.55em',
+    marginLeft: '1px',
+    color: '#a78bfa',
+    animation: 'blink 1s step-start infinite',
   },
 
   // ── Phase 6: memory count badge below workspace button ───────────────────

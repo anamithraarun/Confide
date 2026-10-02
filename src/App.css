@@ -1,0 +1,140 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Confide — Global Design System
+   Phase 8: UI Redesign
+   All component styles live in App.jsx (inline) so this file handles only
+   things that cannot be expressed as inline styles: resets, @keyframes,
+   ::-webkit-scrollbar, :focus-visible, ::placeholder, and hover/active states
+   that require real CSS selectors.
+───────────────────────────────────────────────────────────────────────────── */
+
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #f0f0f5;
+  background: #0d0d10;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* ── Focus ring ─────────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid #7c5cfc;
+  outline-offset: 2px;
+}
+
+/* ── Placeholder text ───────────────────────────────────────────────────── */
+::placeholder {
+  color: #4a4a5e;
+}
+
+/* ── Keyframes ──────────────────────────────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Conversation list item — hover state ───────────────────────────────── */
+.conv-item:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+}
+.conv-item:hover .conv-delete {
+  opacity: 1 !important;
+}
+.conv-item .conv-delete {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+/* ── Sidebar buttons — hover ────────────────────────────────────────────── */
+.sidebar-btn:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* ── New Chat button — hover ────────────────────────────────────────────── */
+.new-chat-btn:hover {
+  opacity: 0.88;
+}
+
+/* ── Send button — hover ────────────────────────────────────────────────── */
+.send-btn:not(:disabled):hover {
+  opacity: 0.88;
+}
+
+/* ── Save button — hover ────────────────────────────────────────────────── */
+.save-btn:not(:disabled):hover {
+  opacity: 0.88;
+}
+
+/* ── Pin button — hover ─────────────────────────────────────────────────── */
+.pin-btn:hover {
+  opacity: 1 !important;
+  color: #a78bfa !important;
+}
+
+/* ── Suggestion chip — hover ────────────────────────────────────────────── */
+.suggestion-chip:hover {
+  background: rgba(124, 92, 252, 0.18) !important;
+  border-color: rgba(124, 92, 252, 0.5) !important;
+  color: #c4b5fd !important;
+}
+
+/* ── Tab button — hover ─────────────────────────────────────────────────── */
+.tab-btn:hover:not(.tab-btn-active) {
+  color: #c4c4d4 !important;
+}
+
+/* ── Memory delete button — hover ───────────────────────────────────────── */
+.memory-delete:hover {
+  background: rgba(248, 113, 113, 0.12) !important;
+  border-color: #f87171 !important;
+}
+
+/* ── Form inputs — focus ────────────────────────────────────────────────── */
+.field-input:focus {
+  border-color: #7c5cfc !important;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(124, 92, 252, 0.15);
+}
+
+/* ── Textarea composer — focus ──────────────────────────────────────────── */
+.composer-textarea:focus {
+  border-color: #7c5cfc !important;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(124, 92, 252, 0.12);
+}

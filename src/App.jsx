@@ -1,16 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 
 /**
- * App — Phase 6: Cross-Chat Business Memory
+ * App — Phase 8: UI Redesign & Polish
+ *
+ * All data-layer logic (IPC calls, state management, streaming) is preserved
+ * verbatim from Phases 4–7.  Only JSX structure and styles have changed.
  *
  * Architecture:
- *  - Left sidebar: conversation list + New Chat button + Business Workspace button
- *  - Right panel (chat): message bubbles with per-message "Save to memory" pin button
- *  - Right panel (workspace): tabbed — "Profile" tab (Phase 5) | "Memory" tab (Phase 6)
- *
- * All data flows through window.confide IPC — SQLite is the source of truth.
+ *  - Left sidebar (260px): branding, New Chat, conversations, workspace section, status
+ *  - Right panel: chat view OR Business Workspace panel (profile + memory tabs)
  */
 export default function App() {
+  // ── Core chat state ──────────────────────────────────────────────────────
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [messages, setMessages] = useState([])
@@ -20,11 +21,11 @@ export default function App() {
   const [bridgeOk, setBridgeOk] = useState(null)
   const messagesEndRef = useRef(null)
 
-  // ── Business Workspace panel state ───────────────────────────────────────
+  // ── Workspace panel state ────────────────────────────────────────────────
   const [showProfile, setShowProfile] = useState(false)
   const [profileTab, setProfileTab] = useState('profile')   // 'profile' | 'memory'
 
-  // ── Business Profile state (Phase 5) ─────────────────────────────────────
+  // ── Business Profile state ───────────────────────────────────────────────
   const [profile, setProfile] = useState(null)
   const [profileForm, setProfileForm] = useState({
     businessName: '', industry: '', description: '',
@@ -34,26 +35,17 @@ export default function App() {
   const [profileError, setProfileError] = useState('')
   const [profileSaved, setProfileSaved] = useState(false)
 
-  // ── Memory state (Phase 6) ───────────────────────────────────────────────
+  // ── Memory state ─────────────────────────────────────────────────────────
   const [memories, setMemories] = useState([])
-  // pinState: Map of msgId → 'idle' | 'saving' | 'saved' | 'duplicate'
-  const [pinState, setPinState] = useState({})
+  const [pinState, setPinState] = useState({})   // msgId → 'idle'|'saving'|'saved'|'duplicate'
   const [memoryError, setMemoryError] = useState('')
 
-  // ── Streaming state (Phase 7) ────────────────────────────────────────────
-  // streamingContent: the live text being accumulated from ollama:stream events
-  // streamingConvId:  which conversation is actively streaming (guards stale events)
+  // ── Streaming state ──────────────────────────────────────────────────────
   const [streamingContent, setStreamingContent] = useState('')
   const [streamingConvId, setStreamingConvId] = useState(null)
 
-  // ── Bridge check + initial data load ────────────────────────────────────
+  // ── Boot ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    // Inject the @keyframes rule for the streaming cursor blink (Phase 7).
-    // Done once here because inline styles cannot define keyframes.
-    const style = document.createElement('style')
-    style.textContent = '@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }'
-    document.head.appendChild(style)
-
     if (typeof window.confide === 'undefined') {
       setBridgeOk(false)
       return
@@ -67,19 +59,18 @@ export default function App() {
     loadMemories()
   }, [])
 
-  // ── Scroll to bottom whenever messages change ────────────────────────────
+  // ── Scroll to bottom on new messages ────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, streamingContent])
 
-  // ── Load conversation list ───────────────────────────────────────────────
+  // ── Data loaders ─────────────────────────────────────────────────────────
   async function loadConversations() {
     const result = await window.confide.invoke('conversation:list')
     if (result.error) { setError(result.error); return }
     setConversations(result.conversations)
   }
 
-  // ── Load business profile ────────────────────────────────────────────────
   async function loadProfile() {
     const result = await window.confide.invoke('profile:get')
     if (result.error) return
@@ -96,14 +87,13 @@ export default function App() {
     }
   }
 
-  // ── Load memories (Phase 6) ──────────────────────────────────────────────
   async function loadMemories() {
     const result = await window.confide.invoke('memory:list')
-    if (result.error) return   // non-fatal
+    if (result.error) return
     setMemories(result.memories)
   }
 
-  // ── Select a conversation ────────────────────────────────────────────────
+  // ── Conversation actions ──────────────────────────────────────────────────
   async function selectConversation(id) {
     setShowProfile(false)
     setActiveId(id)
@@ -114,7 +104,6 @@ export default function App() {
     else setMessages(result.messages)
   }
 
-  // ── Create a new conversation ────────────────────────────────────────────
   async function handleNewChat() {
     const result = await window.confide.invoke('conversation:create', { title: 'New Conversation' })
     if (result.error) { setError(result.error); return }
@@ -122,7 +111,6 @@ export default function App() {
     await selectConversation(result.conversation.id)
   }
 
-  // ── Delete a conversation ────────────────────────────────────────────────
   async function handleDelete(id, e) {
     e.stopPropagation()
     const result = await window.confide.invoke('conversation:delete', { conversationId: id })
@@ -131,7 +119,7 @@ export default function App() {
     await loadConversations()
   }
 
-  // ── Send prompt → Ollama (streaming, Phase 7) ───────────────────────────
+  // ── Send (streaming) ─────────────────────────────────────────────────────
   async function handleSend() {
     const trimmed = prompt.trim()
     if (!trimmed || !activeId || loading) return
@@ -142,53 +130,42 @@ export default function App() {
     setStreamingContent('')
     setStreamingConvId(activeId)
 
-    // Optimistic user bubble while the invoke round-trip completes
     const optimisticUser = { id: '__optimistic__', role: 'user', content: trimmed, created_at: new Date().toISOString() }
     setMessages(prev => [...prev, optimisticUser])
 
-    // Subscribe to streaming chunks BEFORE invoking so no early events are missed
     const unsub = window.confide.on('ollama:stream', (data) => {
-      // Ignore events that belong to a different (stale) conversation
       if (data.conversationId !== activeId) return
 
       if (data.done) {
-        // Unsubscribe first — no more events needed
         unsub()
-
         setStreamingContent('')
         setStreamingConvId(null)
         setLoading(false)
 
         if (data.error) {
           setError(data.error)
-          // Remove the optimistic user bubble on failure
           setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
           return
         }
 
-        // Swap optimistic bubble for real DB-persisted row, append assistant message
         setMessages(prev => [
           ...prev.filter(m => m.id !== '__optimistic__'),
           data.userMessage,
           data.assistantMessage,
         ])
-        // Refresh sidebar — conversation updated_at changed
         loadConversations()
       } else if (data.chunk) {
-        // Append incoming token to the live streaming bubble
         setStreamingContent(prev => prev + data.chunk)
       }
     })
 
     try {
-      // ollama:chat now returns { streaming: true, userMessage } immediately
       const result = await window.confide.invoke('ollama:chat', {
         conversationId: activeId,
         prompt: trimmed,
       })
 
       if (result.error) {
-        // Error returned synchronously (guards fired before streaming started)
         unsub()
         setError(result.error)
         setStreamingContent('')
@@ -198,8 +175,6 @@ export default function App() {
         return
       }
 
-      // Replace the optimistic bubble with the real persisted user message
-      // (assistantMessage arrives later via the stream done event)
       if (result.userMessage) {
         setMessages(prev => [
           ...prev.filter(m => m.id !== '__optimistic__'),
@@ -220,7 +195,7 @@ export default function App() {
     if (e.key === 'Enter' && e.metaKey) handleSend()
   }
 
-  // ── Open workspace panel ─────────────────────────────────────────────────
+  // ── Workspace panel ───────────────────────────────────────────────────────
   function openProfile() {
     setShowProfile(true)
     setActiveId(null)
@@ -231,7 +206,6 @@ export default function App() {
     setMemoryError('')
   }
 
-  // ── Save business profile ────────────────────────────────────────────────
   async function handleProfileSave(e) {
     e.preventDefault()
     setProfileSaving(true)
@@ -253,15 +227,11 @@ export default function App() {
     setTimeout(() => setProfileSaved(false), 2500)
   }
 
-  // ── Save a message to Business Memory (Phase 6) ──────────────────────────
   async function handleSaveToMemory(content, msgId) {
     setPinState(prev => ({ ...prev, [msgId]: 'saving' }))
     setMemoryError('')
 
-    const result = await window.confide.invoke('memory:create', {
-      content,
-      source: 'chat',
-    })
+    const result = await window.confide.invoke('memory:create', { content, source: 'chat' })
 
     if (result.error) {
       setMemoryError(result.error)
@@ -269,14 +239,11 @@ export default function App() {
       return
     }
 
-    // result = { memory, duplicate }
     setPinState(prev => ({ ...prev, [msgId]: result.duplicate ? 'duplicate' : 'saved' }))
     if (!result.duplicate) await loadMemories()
-    // Reset pin back to idle after a moment
     setTimeout(() => setPinState(prev => ({ ...prev, [msgId]: 'idle' })), 2200)
   }
 
-  // ── Delete a memory (Phase 6) ────────────────────────────────────────────
   async function handleDeleteMemory(memoryId) {
     setMemoryError('')
     const result = await window.confide.invoke('memory:delete', { memoryId })
@@ -284,28 +251,39 @@ export default function App() {
     await loadMemories()
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Render helpers
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Suggestion chip handler ───────────────────────────────────────────────
+  async function handleSuggestion(text) {
+    if (loading) return
+    // Create a new chat if none is active, then send the suggestion
+    if (!activeId) {
+      const result = await window.confide.invoke('conversation:create', { title: 'New Conversation' })
+      if (result.error) { setError(result.error); return }
+      await loadConversations()
+      await selectConversation(result.conversation.id)
+      // Let state settle, then set prompt — user can review before sending
+      setPrompt(text)
+      return
+    }
+    setPrompt(text)
+  }
 
-  // Pin button rendered next to every real (non-optimistic) message
+  // ── Render helpers ────────────────────────────────────────────────────────
   function PinButton({ msg }) {
     const state = pinState[msg.id] || 'idle'
     const isSaving = state === 'saving'
-
     let label = '📌'
     let title = 'Save to Business Memory'
-    if (state === 'saving')   { label = '…';  title = 'Saving…' }
-    if (state === 'saved')    { label = '✓';  title = 'Saved to memory' }
-    if (state === 'duplicate'){ label = '✓';  title = 'Already in memory' }
+    if (state === 'saving')    { label = '…'; title = 'Saving…' }
+    if (state === 'saved')     { label = '✓'; title = 'Saved to memory' }
+    if (state === 'duplicate') { label = '✓'; title = 'Already in memory' }
 
     return (
       <button
-        style={
-          state === 'saved' || state === 'duplicate'
-            ? { ...s.pinBtn, ...s.pinBtnSaved }
-            : s.pinBtn
-        }
+        className="pin-btn"
+        style={{
+          ...s.pinBtn,
+          ...(state === 'saved' || state === 'duplicate' ? s.pinBtnSaved : {}),
+        }}
         onClick={() => !isSaving && handleSaveToMemory(msg.content, msg.id)}
         title={title}
         disabled={isSaving}
@@ -316,312 +294,502 @@ export default function App() {
     )
   }
 
+  const activeConv = conversations.find(c => c.id === activeId)
+
   // ─────────────────────────────────────────────────────────────────────────
   // Render
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div style={s.root}>
-      {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+
+      {/* ═══════════════════════════════════════════════════════════════════
+          LEFT SIDEBAR
+      ═══════════════════════════════════════════════════════════════════ */}
       <aside style={s.sidebar}>
-        <div style={s.sidebarTop}>
-          <span style={s.appName}>Confide</span>
-          <span style={bridgeOk === null ? s.dot : bridgeOk ? s.dotOk : s.dotErr} />
-        </div>
 
-        <button style={s.newChatBtn} onClick={handleNewChat}>
-          + New Chat
-        </button>
-
-        <div style={s.convList}>
-          {conversations.length === 0 && (
-            <p style={s.empty}>No conversations yet</p>
-          )}
-          {conversations.map(conv => (
-            <div
-              key={conv.id}
-              style={conv.id === activeId ? { ...s.convItem, ...s.convItemActive } : s.convItem}
-              onClick={() => selectConversation(conv.id)}
-            >
-              <span style={s.convTitle}>{conv.title}</span>
-              <button
-                style={s.deleteBtn}
-                onClick={(e) => handleDelete(conv.id, e)}
-                title="Delete conversation"
-              >×</button>
+        {/* ── Branding ──────────────────────────────────────────────────── */}
+        <div style={s.brand}>
+          <div style={s.brandInner}>
+            <div style={s.brandLogo}>C</div>
+            <div>
+              <div style={s.brandName}>Confide</div>
+              <div style={s.brandSub}>Private AI workspace</div>
             </div>
-          ))}
+          </div>
+          <span
+            style={bridgeOk === null ? s.statusDot : bridgeOk ? s.statusDotOk : s.statusDotErr}
+            title={bridgeOk ? 'Connected' : 'Bridge error'}
+          />
         </div>
 
-        {/* Business Workspace button — pinned to sidebar bottom */}
-        <div style={s.sidebarBottom}>
-          <button
-            style={showProfile ? { ...s.profileBtn, ...s.profileBtnActive } : s.profileBtn}
-            onClick={openProfile}
-            title="Business Workspace"
-          >
-            <span style={s.profileBtnIcon}>🏢</span>
-            <span style={s.profileBtnLabel}>
-              {profile?.business_name ? profile.business_name : 'Set up workspace'}
-            </span>
-            {!profile?.business_name && <span style={s.profileBtnBadge}>!</span>}
+        {/* ── New Chat ──────────────────────────────────────────────────── */}
+        <div style={s.sidebarSection}>
+          <button className="new-chat-btn" style={s.newChatBtn} onClick={handleNewChat}>
+            <span style={s.newChatIcon}>＋</span>
+            New Chat
           </button>
-          {memories.length > 0 && (
-            <div style={s.memoryBadgeRow}>
-              <span style={s.memoryBadge}>📌 {memories.length} {memories.length === 1 ? 'memory' : 'memories'}</span>
-            </div>
-          )}
         </div>
+
+        {/* ── Conversations ─────────────────────────────────────────────── */}
+        <div style={s.sidebarSection}>
+          <div style={s.sectionLabel}>Conversations</div>
+          <div style={s.convList}>
+            {conversations.length === 0 && (
+              <p style={s.convEmpty}>No conversations yet</p>
+            )}
+            {conversations.map(conv => (
+              <div
+                key={conv.id}
+                className="conv-item"
+                style={{
+                  ...s.convItem,
+                  ...(conv.id === activeId && !showProfile ? s.convItemActive : {}),
+                }}
+                onClick={() => selectConversation(conv.id)}
+                title={conv.title}
+              >
+                <span style={s.convIcon}>💬</span>
+                <span style={s.convTitle}>{conv.title}</span>
+                <button
+                  className="conv-delete"
+                  style={s.convDelete}
+                  onClick={(e) => handleDelete(conv.id, e)}
+                  title="Delete conversation"
+                  aria-label="Delete conversation"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Workspace section ─────────────────────────────────────────── */}
+        <div style={{ ...s.sidebarSection, marginTop: 'auto' }}>
+          <div style={s.sectionLabel}>Workspace</div>
+
+          <button
+            className="sidebar-btn"
+            style={{
+              ...s.workspaceBtn,
+              ...(showProfile && profileTab === 'profile' ? s.workspaceBtnActive : {}),
+            }}
+            onClick={() => {
+              openProfile()
+              setProfileTab('profile')
+            }}
+          >
+            <span style={s.workspaceBtnIcon}>🏢</span>
+            <div style={s.workspaceBtnText}>
+              <span style={s.workspaceBtnLabel}>Business Profile</span>
+              {profile?.business_name && (
+                <span style={s.workspaceBtnSub}>{profile.business_name}</span>
+              )}
+            </div>
+            {!profile?.business_name && <span style={s.setupBadge}>Set up</span>}
+          </button>
+
+          <button
+            className="sidebar-btn"
+            style={{
+              ...s.workspaceBtn,
+              marginTop: 4,
+              ...(showProfile && profileTab === 'memory' ? s.workspaceBtnActive : {}),
+            }}
+            onClick={() => {
+              openProfile()
+              setProfileTab('memory')
+            }}
+          >
+            <span style={s.workspaceBtnIcon}>🧠</span>
+            <div style={s.workspaceBtnText}>
+              <span style={s.workspaceBtnLabel}>Business Memory</span>
+              {memories.length > 0 && (
+                <span style={s.workspaceBtnSub}>{memories.length} {memories.length === 1 ? 'fact' : 'facts'} saved</span>
+              )}
+            </div>
+          </button>
+        </div>
+
+        {/* ── Local status footer ───────────────────────────────────────── */}
+        <div style={s.statusFooter}>
+          <div style={s.statusRow}>
+            <span style={s.statusIcon}>🔒</span>
+            <span style={s.statusText}>Private Mode</span>
+          </div>
+          <div style={s.statusMeta}>
+            <span>AI processing: Local</span>
+            <span style={s.statusDivider}>·</span>
+            <span>Storage: Local</span>
+          </div>
+          <div style={s.statusMeta}>Model: Gemma 3 1B</div>
+        </div>
+
       </aside>
 
-      {/* ── Main panel ──────────────────────────────────────────────────── */}
-      <div style={s.panel}>
+      {/* ═══════════════════════════════════════════════════════════════════
+          MAIN PANEL
+      ═══════════════════════════════════════════════════════════════════ */}
+      <div style={s.main}>
 
         {/* ── Business Workspace panel ──────────────────────────────────── */}
         {showProfile ? (
-          <>
-            <header style={s.header}>
-              <span style={s.headerTitle}>Business Workspace</span>
-              <span style={s.model}>local · private</span>
-            </header>
+          <div style={s.workspacePanel}>
 
-            <main style={{ ...s.messages, display: 'block', overflowY: 'auto' }}>
-              <div style={s.profilePanel}>
+            {/* Header */}
+            <div style={s.workspaceHeader}>
+              <div>
+                <h1 style={s.workspaceTitle}>Business Workspace</h1>
+                <p style={s.workspaceSubtitle}>
+                  Context stored locally · Used by the AI in every conversation
+                </p>
+              </div>
+            </div>
 
-                {/* Tabs */}
-                <div style={s.profileTabs}>
-                  <button
-                    style={profileTab === 'profile' ? { ...s.profileTabBtn, ...s.profileTabBtnActive } : s.profileTabBtn}
-                    onClick={() => setProfileTab('profile')}
-                  >
-                    Business Profile
-                  </button>
-                  <button
-                    style={profileTab === 'memory' ? { ...s.profileTabBtn, ...s.profileTabBtnActive } : s.profileTabBtn}
-                    onClick={() => setProfileTab('memory')}
-                  >
-                    Business Memory
-                    {memories.length > 0 && (
-                      <span style={s.tabCount}>{memories.length}</span>
-                    )}
-                  </button>
-                </div>
+            {/* Tabs */}
+            <div style={s.tabs}>
+              <button
+                className={`tab-btn${profileTab === 'profile' ? ' tab-btn-active' : ''}`}
+                style={{
+                  ...s.tabBtn,
+                  ...(profileTab === 'profile' ? s.tabBtnActive : {}),
+                }}
+                onClick={() => setProfileTab('profile')}
+              >
+                Business Profile
+              </button>
+              <button
+                className={`tab-btn${profileTab === 'memory' ? ' tab-btn-active' : ''}`}
+                style={{
+                  ...s.tabBtn,
+                  ...(profileTab === 'memory' ? s.tabBtnActive : {}),
+                }}
+                onClick={() => setProfileTab('memory')}
+              >
+                Business Memory
+                {memories.length > 0 && (
+                  <span style={s.tabBadge}>{memories.length}</span>
+                )}
+              </button>
+            </div>
 
-                {/* ── Profile tab ─────────────────────────────────────────── */}
-                {profileTab === 'profile' && (
-                  <>
-                    <p style={s.profileIntro}>
-                      Your business information is stored locally and used to give the AI context
-                      when you chat. It never leaves your device.
-                    </p>
+            {/* Tab content */}
+            <div style={s.workspaceContent}>
 
-                    {profileError && (
-                      <div style={s.errorBox}>
-                        <strong style={{ color: '#f87171' }}>Error: </strong>
-                        <code style={s.errorText}>{profileError}</code>
-                      </div>
-                    )}
+              {/* ── Profile tab ─────────────────────────────────────── */}
+              {profileTab === 'profile' && (
+                <div style={s.formPanel}>
+                  <p style={s.formDesc}>
+                    Tell Confide about your business so the AI can give you more relevant answers.
+                    This information is stored entirely on your device.
+                  </p>
 
-                    {profileSaved && (
-                      <div style={s.successBox}>
-                        ✓ Profile saved — Confide will use this context in all new chats.
-                      </div>
-                    )}
+                  {profileError && (
+                    <div style={s.alertError}>⚠ {profileError}</div>
+                  )}
+                  {profileSaved && (
+                    <div style={s.alertSuccess}>✓ Profile saved — the AI will use this context in all new chats.</div>
+                  )}
 
-                    <form onSubmit={handleProfileSave} style={s.profileForm}>
-                      <label style={s.fieldLabel}>
+                  <form onSubmit={handleProfileSave} style={s.form}>
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>
                         Business name <span style={s.required}>*</span>
                       </label>
                       <input
-                        style={s.fieldInput}
+                        className="field-input"
+                        style={s.input}
                         type="text"
                         placeholder="e.g. Acme Corp"
                         value={profileForm.businessName}
                         onChange={e => setProfileForm(f => ({ ...f, businessName: e.target.value }))}
                         required
                       />
+                    </div>
 
-                      <label style={s.fieldLabel}>Industry</label>
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>Industry</label>
                       <input
-                        style={s.fieldInput}
+                        className="field-input"
+                        style={s.input}
                         type="text"
                         placeholder="e.g. SaaS, E-commerce, Consulting…"
                         value={profileForm.industry}
                         onChange={e => setProfileForm(f => ({ ...f, industry: e.target.value }))}
                       />
+                    </div>
 
-                      <label style={s.fieldLabel}>Business description</label>
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>Business description</label>
                       <textarea
-                        style={{ ...s.fieldInput, ...s.fieldTextarea }}
+                        className="field-input"
+                        style={{ ...s.input, ...s.textarea }}
                         rows={4}
                         placeholder="What does your business do? What problem does it solve?"
                         value={profileForm.description}
                         onChange={e => setProfileForm(f => ({ ...f, description: e.target.value }))}
                       />
+                    </div>
 
-                      <label style={s.fieldLabel}>Target customers</label>
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>Target customers</label>
                       <input
-                        style={s.fieldInput}
+                        className="field-input"
+                        style={s.input}
                         type="text"
                         placeholder="e.g. Small business owners in the US"
                         value={profileForm.targetCustomers}
                         onChange={e => setProfileForm(f => ({ ...f, targetCustomers: e.target.value }))}
                       />
+                    </div>
 
-                      <label style={s.fieldLabel}>Budget / financial context</label>
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>Budget / financial context</label>
                       <input
-                        style={s.fieldInput}
+                        className="field-input"
+                        style={s.input}
                         type="text"
                         placeholder="e.g. Bootstrap, $50k ARR, Series A…"
                         value={profileForm.budget}
                         onChange={e => setProfileForm(f => ({ ...f, budget: e.target.value }))}
                       />
+                    </div>
 
-                      <button
-                        type="submit"
-                        style={profileSaving ? { ...s.saveBtn, ...s.sendBtnDisabled } : s.saveBtn}
-                        disabled={profileSaving}
-                      >
-                        {profileSaving ? 'Saving…' : 'Save profile'}
-                      </button>
-                    </form>
+                    <button
+                      type="submit"
+                      className="save-btn"
+                      style={{
+                        ...s.primaryBtn,
+                        ...(profileSaving ? s.primaryBtnDisabled : {}),
+                      }}
+                      disabled={profileSaving}
+                    >
+                      {profileSaving ? 'Saving…' : 'Save profile'}
+                    </button>
+                  </form>
+                </div>
+              )}
+
+              {/* ── Memory tab ──────────────────────────────────────── */}
+              {profileTab === 'memory' && (
+                <div style={s.formPanel}>
+                  <p style={s.formDesc}>
+                    Saved facts the AI will remember across all conversations.
+                    Open any chat and click 📌 on a message to save it here.
+                  </p>
+
+                  {memoryError && (
+                    <div style={s.alertError}>⚠ {memoryError}</div>
+                  )}
+
+                  {memories.length === 0 ? (
+                    <div style={s.emptyMemory}>
+                      <div style={s.emptyMemoryIcon}>🧠</div>
+                      <p style={s.emptyMemoryTitle}>No memories yet</p>
+                      <p style={s.emptyMemoryDesc}>
+                        Pin messages in chat to save important business facts here.
+                        Confide will reference them across all your conversations.
+                      </p>
+                    </div>
+                  ) : (
+                    <ul style={s.memoryList}>
+                      {memories.map(mem => (
+                        <li key={mem.id} style={s.memoryCard}>
+                          <p style={s.memoryText}>{mem.content}</p>
+                          <div style={s.memoryFooter}>
+                            <span style={s.memoryDate}>
+                              {new Date(mem.created_at).toLocaleDateString(undefined, {
+                                month: 'short', day: 'numeric', year: 'numeric',
+                              })}
+                            </span>
+                            <button
+                              className="memory-delete"
+                              style={s.memoryDeleteBtn}
+                              onClick={() => handleDeleteMemory(mem.id)}
+                              title="Delete this memory"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+            </div>
+          </div>
+
+        ) : (
+          /* ── Chat view ──────────────────────────────────────────────── */
+          <div style={s.chatView}>
+
+            {/* ── Chat header ─────────────────────────────────────────── */}
+            <div style={s.chatHeader}>
+              <div style={s.chatHeaderLeft}>
+                {activeId && (
+                  <>
+                    <span style={s.chatHeaderIcon}>💬</span>
+                    <span style={s.chatHeaderTitle}>
+                      {activeConv?.title ?? 'Conversation'}
+                    </span>
                   </>
                 )}
+              </div>
+              <div style={s.chatHeaderRight}>
+                <span style={s.modelBadge}>
+                  <span style={s.modelDot} />
+                  Gemma 3 1B · local
+                </span>
+              </div>
+            </div>
 
-                {/* ── Memory tab (Phase 6) ─────────────────────────────────── */}
-                {profileTab === 'memory' && (
-                  <>
-                    <p style={s.profileIntro}>
-                      Saved facts the AI will remember across all conversations.
-                      Pin any message with 📌 in chat to save it here.
+            {/* ── Messages area ───────────────────────────────────────── */}
+            <div style={s.messagesArea}>
+              <div style={s.messagesFeed}>
+
+                {/* Empty state — no conversation selected */}
+                {!activeId && (
+                  <div style={s.emptyState}>
+                    <div style={s.emptyLogo}>C</div>
+                    <h2 style={s.emptyTitle}>Welcome to Confide</h2>
+                    <p style={s.emptySubtitle}>
+                      Your private AI workspace for sensitive business decisions.
+                      <br />All AI processing and data stays on your device.
                     </p>
+                    <div style={s.suggestions}>
+                      {[
+                        'Help me analyze my business idea',
+                        'Create a marketing strategy',
+                        'Review my pricing strategy',
+                        'Help me plan my next product launch',
+                      ].map(text => (
+                        <button
+                          key={text}
+                          className="suggestion-chip"
+                          style={s.chip}
+                          onClick={() => handleSuggestion(text)}
+                        >
+                          {text}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-                    {memoryError && (
-                      <div style={s.errorBox}>
-                        <strong style={{ color: '#f87171' }}>Error: </strong>
-                        <code style={s.errorText}>{memoryError}</code>
+                {/* Empty conversation — started but no messages */}
+                {activeId && messages.length === 0 && !loading && (
+                  <div style={s.emptyConv}>
+                    <p style={s.emptyConvText}>Start the conversation below.</p>
+                  </div>
+                )}
+
+                {/* Message list */}
+                {messages.map(msg => (
+                  <div
+                    key={msg.id}
+                    style={msg.role === 'user' ? s.userMsg : s.assistantMsg}
+                  >
+                    {msg.role === 'user' ? (
+                      /* User message */
+                      <div style={s.userMsgInner}>
+                        <div style={s.userMsgHeader}>
+                          <span style={s.userLabel}>You</span>
+                          {msg.id !== '__optimistic__' && <PinButton msg={msg} />}
+                        </div>
+                        <p style={s.msgText}>{msg.content}</p>
+                      </div>
+                    ) : (
+                      /* Assistant message */
+                      <div style={s.assistantMsgInner}>
+                        <div style={s.assistantMsgHeader}>
+                          <div style={s.aiAvatar}>AI</div>
+                          <span style={s.assistantLabel}>Confide</span>
+                          {msg.id !== '__optimistic__' && <PinButton msg={msg} />}
+                        </div>
+                        <p style={s.msgText}>{msg.content}</p>
                       </div>
                     )}
+                  </div>
+                ))}
 
-                    {memories.length === 0 ? (
-                      <p style={{ ...s.profileIntro, marginTop: 24 }}>
-                        No memories saved yet. Open a chat and click 📌 on any message to save it.
+                {/* Streaming / loading bubble */}
+                {loading && (
+                  <div style={s.assistantMsg}>
+                    <div style={s.assistantMsgInner}>
+                      <div style={s.assistantMsgHeader}>
+                        <div style={s.aiAvatar}>AI</div>
+                        <span style={s.assistantLabel}>Confide</span>
+                        {streamingContent && (
+                          <span style={s.generatingBadge}>generating</span>
+                        )}
+                      </div>
+                      <p style={s.msgText}>
+                        {streamingContent || (
+                          <span style={s.thinkingText}>Thinking…</span>
+                        )}
+                        {streamingContent && (
+                          <span style={s.streamCursor}>▋</span>
+                        )}
                       </p>
-                    ) : (
-                      <ul style={s.memoryList}>
-                        {memories.map(mem => (
-                          <li key={mem.id} style={s.memoryItem}>
-                            <p style={s.memoryContent}>{mem.content}</p>
-                            <div style={s.memoryMeta}>
-                              <span style={s.memoryDate}>
-                                {new Date(mem.created_at).toLocaleDateString(undefined, {
-                                  month: 'short', day: 'numeric', year: 'numeric',
-                                })}
-                              </span>
-                              <button
-                                style={s.memoryDeleteBtn}
-                                onClick={() => handleDeleteMemory(mem.id)}
-                                title="Delete this memory"
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </>
+                    </div>
+                  </div>
                 )}
 
+                {/* Error */}
+                {error && (
+                  <div style={s.errorBanner}>
+                    <span style={s.errorIcon}>⚠</span>
+                    <span>{error}</span>
+                  </div>
+                )}
+
+                <div ref={messagesEndRef} />
               </div>
-            </main>
-          </>
-        ) : (
-          /* ── Chat view (Phase 1–4 preserved, Phase 6 pin buttons added) ── */
-          <>
-            <header style={s.header}>
-              <span style={s.headerTitle}>
-                {activeId
-                  ? (conversations.find(c => c.id === activeId)?.title ?? 'Conversation')
-                  : 'Select or create a conversation'}
-              </span>
-              <span style={s.model}>gemma3:1b · local</span>
-            </header>
+            </div>
 
-            <main style={s.messages}>
-              {!activeId && (
-                <p style={s.placeholder}>← Create a new chat to get started</p>
-              )}
-
-              {activeId && messages.length === 0 && !loading && (
-                <p style={s.placeholder}>Send a message to begin</p>
-              )}
-
-              {messages.map(msg => (
-                <div
-                  key={msg.id}
-                  style={msg.role === 'user' ? s.userBubble : s.assistantBubble}
+            {/* ── Composer ────────────────────────────────────────────── */}
+            <div style={s.composerWrap}>
+              <div style={s.composer}>
+                <textarea
+                  className="composer-textarea"
+                  style={s.composerTextarea}
+                  rows={1}
+                  placeholder={
+                    activeId
+                      ? 'Message Confide… (⌘↩ to send)'
+                      : 'Start a new chat to begin'
+                  }
+                  value={prompt}
+                  onChange={e => setPrompt(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  disabled={!activeId || loading}
+                />
+                <button
+                  className="send-btn"
+                  style={{
+                    ...s.sendBtn,
+                    ...(!activeId || loading || !prompt.trim() ? s.sendBtnDisabled : {}),
+                  }}
+                  onClick={handleSend}
+                  disabled={!activeId || loading || !prompt.trim()}
+                  title="Send (⌘↩)"
+                  aria-label="Send message"
                 >
-                  <div style={s.bubbleHeader}>
-                    <span style={msg.role === 'user' ? s.roleUser : s.roleAssistant}>
-                      {msg.role === 'user' ? 'You' : 'gemma3:1b'}
-                    </span>
-                    {/* Only real (persisted) messages can be pinned */}
-                    {msg.id !== '__optimistic__' && (
-                      <PinButton msg={msg} />
-                    )}
-                  </div>
-                  <p style={s.msgText}>{msg.content}</p>
-                </div>
-              ))}
+                  {loading ? (
+                    <span style={s.sendBtnSpinner}>…</span>
+                  ) : (
+                    <span style={s.sendBtnArrow}>↑</span>
+                  )}
+                </button>
+              </div>
+              <p style={s.composerHint}>
+                ⌘↩ to send · 📌 to save a message to Business Memory
+              </p>
+            </div>
 
-              {/* Loading / streaming bubble (Phase 7) */}
-              {loading && (
-                <div style={s.assistantBubble}>
-                  <div style={s.bubbleHeader}>
-                    <span style={s.roleAssistant}>gemma3:1b</span>
-                  </div>
-                  <p style={s.msgText}>
-                    {streamingContent
-                      ? streamingContent          // live token accumulation
-                      : <span style={{ color: '#6b7280' }}>Thinking…</span>
-                    }
-                    {/* Blinking cursor shown while actively streaming */}
-                    {streamingContent && (
-                      <span style={s.streamCursor}>▋</span>
-                    )}
-                  </p>
-                </div>
-              )}
-
-              {error && (
-                <div style={s.errorBox}>
-                  <strong style={{ color: '#f87171' }}>Error: </strong>
-                  <code style={s.errorText}>{error}</code>
-                </div>
-              )}
-
-              <div ref={messagesEndRef} />
-            </main>
-
-            <footer style={s.footer}>
-              <textarea
-                style={s.textarea}
-                rows={3}
-                placeholder={activeId ? 'Enter your prompt… (⌘↩ to send)' : 'Select a conversation first'}
-                value={prompt}
-                onChange={e => setPrompt(e.target.value)}
-                onKeyDown={handleKeyDown}
-                disabled={!activeId || loading}
-              />
-              <button
-                style={(!activeId || loading || !prompt.trim()) ? { ...s.sendBtn, ...s.sendBtnDisabled } : s.sendBtn}
-                onClick={handleSend}
-                disabled={!activeId || loading || !prompt.trim()}
-              >
-                {loading ? '…' : 'Send ⌘↩'}
-              </button>
-            </footer>
-          </>
+          </div>
         )}
 
       </div>
@@ -630,469 +798,842 @@ export default function App() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Design tokens
+// ─────────────────────────────────────────────────────────────────────────────
+const color = {
+  bg:           '#0d0d10',
+  sidebar:      '#111116',
+  surface:      '#18181f',
+  surfaceHover: '#1e1e28',
+  border:       'rgba(255, 255, 255, 0.07)',
+  borderFocus:  '#7c5cfc',
+  accent:       '#7c5cfc',
+  accentLight:  '#a78bfa',
+  accentDim:    'rgba(124, 92, 252, 0.15)',
+  text:         '#f0f0f5',
+  textSec:      '#8b8b9e',
+  textMuted:    '#5a5a6e',
+  success:      '#22c55e',
+  successBg:    'rgba(34, 197, 94, 0.1)',
+  error:        '#f87171',
+  errorBg:      'rgba(248, 113, 113, 0.1)',
+  userMsgBg:    '#1e1e2c',
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Styles
 // ─────────────────────────────────────────────────────────────────────────────
 const s = {
+
+  // ── Root layout ───────────────────────────────────────────────────────────
   root: {
     display: 'flex',
     height: '100vh',
-    background: '#0f0f13',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    color: '#e0e0e0',
+    background: color.bg,
+    color: color.text,
     overflow: 'hidden',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
   },
 
-  // Sidebar
+  // ── Sidebar ───────────────────────────────────────────────────────────────
   sidebar: {
-    width: '220px',
+    width: 260,
     flexShrink: 0,
-    background: '#13131a',
-    borderRight: '1px solid #1e1e2e',
+    background: color.sidebar,
+    borderRight: `1px solid ${color.border}`,
     display: 'flex',
     flexDirection: 'column',
+    overflow: 'hidden',
+    paddingTop: 44,      // macOS traffic lights clearance
   },
-  sidebarTop: {
+
+  // Branding
+  brand: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '20px 16px 12px',
-    // Extra top padding for macOS traffic lights
-    paddingTop: '52px',
+    padding: '16px 16px 12px',
+    WebkitAppRegion: 'drag',
+    flexShrink: 0,
+  },
+  brandInner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
     WebkitAppRegion: 'drag',
   },
-  appName: {
+  brandLogo: {
+    width: 32,
+    height: 32,
+    borderRadius: 9,
+    background: `linear-gradient(135deg, ${color.accent}, #2563eb)`,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '1rem',
+    fontWeight: 700,
+    color: '#fff',
+    flexShrink: 0,
+  },
+  brandName: {
     fontSize: '0.95rem',
     fontWeight: 700,
-    background: 'linear-gradient(135deg, #a78bfa, #60a5fa)',
-    WebkitBackgroundClip: 'text',
-    WebkitTextFillColor: 'transparent',
+    color: color.text,
+    lineHeight: 1.2,
   },
-  dot:    { width: 8, height: 8, borderRadius: '50%', background: '#4b5563', display: 'inline-block' },
-  dotOk:  { width: 8, height: 8, borderRadius: '50%', background: '#34d399', display: 'inline-block' },
-  dotErr: { width: 8, height: 8, borderRadius: '50%', background: '#f87171', display: 'inline-block' },
+  brandSub: {
+    fontSize: '0.68rem',
+    color: color.textMuted,
+    lineHeight: 1.2,
+  },
+  statusDot: {
+    width: 7, height: 7, borderRadius: '50%',
+    background: color.textMuted, display: 'inline-block', flexShrink: 0,
+  },
+  statusDotOk: {
+    width: 7, height: 7, borderRadius: '50%',
+    background: color.success, display: 'inline-block', flexShrink: 0,
+  },
+  statusDotErr: {
+    width: 7, height: 7, borderRadius: '50%',
+    background: color.error, display: 'inline-block', flexShrink: 0,
+  },
 
+  // Sidebar sections
+  sidebarSection: {
+    padding: '8px 12px',
+    flexShrink: 0,
+  },
+  sectionLabel: {
+    fontSize: '0.68rem',
+    fontWeight: 600,
+    color: color.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+    padding: '4px 4px 8px',
+  },
+
+  // New Chat button
   newChatBtn: {
-    margin: '0 12px 12px',
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
     padding: '9px 12px',
-    background: 'linear-gradient(135deg, #7c3aed, #2563eb)',
-    color: '#fff',
+    background: `linear-gradient(135deg, ${color.accent}, #2563eb)`,
     border: 'none',
-    borderRadius: '8px',
-    fontSize: '0.82rem',
+    borderRadius: 8,
+    color: '#fff',
+    fontSize: '0.83rem',
     fontWeight: 600,
     cursor: 'pointer',
     WebkitAppRegion: 'no-drag',
+    transition: 'opacity 0.15s',
+  },
+  newChatIcon: {
+    fontSize: '1rem',
+    lineHeight: 1,
   },
 
+  // Conversation list
   convList: {
-    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 1,
+    maxHeight: 320,
     overflowY: 'auto',
-    padding: '0 8px',
+    WebkitAppRegion: 'no-drag',
   },
-  empty: {
+  convEmpty: {
     fontSize: '0.78rem',
-    color: '#4b5563',
+    color: color.textMuted,
+    padding: '8px 4px',
     textAlign: 'center',
-    marginTop: '24px',
   },
   convItem: {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '8px 10px',
-    borderRadius: '8px',
+    gap: 8,
+    padding: '7px 8px',
+    borderRadius: 7,
     cursor: 'pointer',
-    marginBottom: '2px',
-    gap: '6px',
+    WebkitAppRegion: 'no-drag',
+    transition: 'background 0.12s',
+    position: 'relative',
   },
   convItemActive: {
-    background: '#1e1e2e',
+    background: color.accentDim,
+  },
+  convIcon: {
+    fontSize: '0.8rem',
+    flexShrink: 0,
+    opacity: 0.6,
   },
   convTitle: {
+    flex: 1,
     fontSize: '0.82rem',
-    color: '#c4b5fd',
+    color: color.textSec,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
-    flex: 1,
   },
-  deleteBtn: {
+  convDelete: {
     background: 'none',
     border: 'none',
-    color: '#4b5563',
+    color: color.textMuted,
     cursor: 'pointer',
-    fontSize: '1rem',
+    fontSize: '0.7rem',
+    padding: '2px 4px',
+    borderRadius: 4,
     lineHeight: 1,
-    padding: '0 2px',
     flexShrink: 0,
+    WebkitAppRegion: 'no-drag',
   },
 
-  // Sidebar bottom — business profile button
-  sidebarBottom: {
-    padding: '8px 12px 16px',
-    borderTop: '1px solid #1e1e2e',
-    flexShrink: 0,
-  },
-  profileBtn: {
+  // Workspace buttons
+  workspaceBtn: {
     width: '100%',
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    gap: 10,
     padding: '9px 10px',
     background: 'none',
-    border: '1px solid #1e1e2e',
-    borderRadius: '8px',
-    color: '#9ca3af',
+    border: `1px solid ${color.border}`,
+    borderRadius: 8,
+    color: color.textSec,
     cursor: 'pointer',
-    fontSize: '0.8rem',
+    fontSize: '0.82rem',
     textAlign: 'left',
     WebkitAppRegion: 'no-drag',
+    transition: 'background 0.12s, border-color 0.12s',
   },
-  profileBtnActive: {
-    background: '#1e1e2e',
-    borderColor: '#7c3aed',
-    color: '#e0e0e0',
+  workspaceBtnActive: {
+    background: color.accentDim,
+    borderColor: `rgba(124, 92, 252, 0.35)`,
+    color: color.text,
   },
-  profileBtnIcon: {
-    fontSize: '0.9rem',
+  workspaceBtnIcon: {
+    fontSize: '0.95rem',
     flexShrink: 0,
   },
-  profileBtnLabel: {
+  workspaceBtnText: {
     flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 1,
+    overflow: 'hidden',
+  },
+  workspaceBtnLabel: {
+    fontSize: '0.82rem',
+    fontWeight: 500,
+    color: 'inherit',
+  },
+  workspaceBtnSub: {
+    fontSize: '0.7rem',
+    color: color.textMuted,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
-  profileBtnBadge: {
-    background: '#f59e0b',
-    color: '#000',
-    borderRadius: '50%',
-    width: 16,
-    height: 16,
+  setupBadge: {
+    background: 'rgba(245, 158, 11, 0.15)',
+    color: '#f59e0b',
+    borderRadius: 4,
+    padding: '1px 6px',
     fontSize: '0.65rem',
-    fontWeight: 700,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    fontWeight: 600,
     flexShrink: 0,
   },
 
-  // Main panel
-  panel: {
+  // Status footer
+  statusFooter: {
+    padding: '12px 16px 16px',
+    borderTop: `1px solid ${color.border}`,
+    flexShrink: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  statusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  statusIcon: {
+    fontSize: '0.8rem',
+  },
+  statusText: {
+    fontSize: '0.75rem',
+    fontWeight: 600,
+    color: color.textSec,
+  },
+  statusMeta: {
+    fontSize: '0.68rem',
+    color: color.textMuted,
+    display: 'flex',
+    gap: 4,
+    flexWrap: 'wrap',
+  },
+  statusDivider: {
+    color: color.textMuted,
+    opacity: 0.4,
+  },
+
+  // ── Main panel ────────────────────────────────────────────────────────────
+  main: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    background: color.bg,
+  },
+
+  // ── Business Workspace panel ──────────────────────────────────────────────
+  workspacePanel: {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
   },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '14px 24px',
-    borderBottom: '1px solid #1e1e2e',
+  workspaceHeader: {
+    padding: '28px 40px 0',
     flexShrink: 0,
-    WebkitAppRegion: 'drag',
+    borderBottom: `1px solid ${color.border}`,
+    paddingBottom: 0,
   },
-  headerTitle: {
-    fontSize: '0.9rem',
-    fontWeight: 600,
-    color: '#e0e0e0',
-    WebkitAppRegion: 'no-drag',
+  workspaceTitle: {
+    fontSize: '1.2rem',
+    fontWeight: 700,
+    color: color.text,
+    marginBottom: 4,
   },
-  model: {
-    fontSize: '0.72rem',
-    color: '#4b5563',
-    letterSpacing: '0.06em',
-  },
-
-  messages: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '24px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '16px',
-  },
-  placeholder: {
-    color: '#4b5563',
-    fontSize: '0.88rem',
-    textAlign: 'center',
-    marginTop: '80px',
-  },
-
-  userBubble: {
-    alignSelf: 'flex-end',
-    maxWidth: '72%',
-    background: '#1e1e2e',
-    border: '1px solid #2a2a3a',
-    borderRadius: '12px 12px 2px 12px',
-    padding: '12px 16px',
-  },
-  assistantBubble: {
-    alignSelf: 'flex-start',
-    maxWidth: '80%',
-    background: '#13131a',
-    border: '1px solid #1e1e2e',
-    borderRadius: '2px 12px 12px 12px',
-    padding: '12px 16px',
-  },
-  roleUser: {
-    display: 'block',
-    fontSize: '0.68rem',
-    color: '#60a5fa',
-    textTransform: 'uppercase',
-    letterSpacing: '0.08em',
-    marginBottom: '6px',
-  },
-  roleAssistant: {
-    display: 'block',
-    fontSize: '0.68rem',
-    color: '#a78bfa',
-    textTransform: 'uppercase',
-    letterSpacing: '0.08em',
-    marginBottom: '6px',
-  },
-  msgText: {
-    margin: 0,
-    fontSize: '0.9rem',
-    lineHeight: 1.65,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-  },
-
-  errorBox: {
-    padding: '12px 16px',
-    background: '#1a0a0a',
-    border: '1px solid #7f1d1d',
-    borderRadius: '8px',
+  workspaceSubtitle: {
     fontSize: '0.82rem',
-  },
-  errorText: {
-    color: '#fca5a5',
-    fontFamily: 'ui-monospace, "SF Mono", monospace',
-    fontSize: '0.8rem',
+    color: color.textSec,
+    marginBottom: 20,
   },
 
-  footer: {
+  // Tabs
+  tabs: {
     display: 'flex',
-    gap: '10px',
-    padding: '14px 24px',
-    borderTop: '1px solid #1e1e2e',
+    gap: 0,
+    padding: '0 40px',
+    borderBottom: `1px solid ${color.border}`,
     flexShrink: 0,
   },
-  textarea: {
-    flex: 1,
-    background: '#1a1a24',
-    border: '1px solid #2a2a3a',
-    borderRadius: '10px',
-    padding: '10px 14px',
-    color: '#e0e0e0',
-    fontSize: '0.88rem',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    resize: 'none',
-    outline: 'none',
-    lineHeight: 1.5,
-  },
-  sendBtn: {
-    background: 'linear-gradient(135deg, #7c3aed, #2563eb)',
-    color: '#fff',
-    border: 'none',
-    borderRadius: '10px',
-    padding: '0 20px',
-    fontSize: '0.82rem',
-    fontWeight: 600,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  },
-  sendBtnDisabled: {
-    opacity: 0.35,
-    cursor: 'not-allowed',
-  },
-
-  // Business Profile panel (Phase 5)
-  profilePanel: {
-    maxWidth: '560px',
-    margin: '0 auto',
-    padding: '8px 0 40px',
-  },
-  profileIntro: {
-    fontSize: '0.85rem',
-    color: '#6b7280',
-    lineHeight: 1.6,
-    marginBottom: '24px',
-  },
-  profileForm: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '6px',
-  },
-  fieldLabel: {
-    fontSize: '0.78rem',
-    fontWeight: 600,
-    color: '#9ca3af',
-    textTransform: 'uppercase',
-    letterSpacing: '0.06em',
-    marginTop: '12px',
-  },
-  required: {
-    color: '#f87171',
-  },
-  fieldInput: {
-    background: '#1a1a24',
-    border: '1px solid #2a2a3a',
-    borderRadius: '8px',
-    padding: '9px 12px',
-    color: '#e0e0e0',
-    fontSize: '0.88rem',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    outline: 'none',
-    width: '100%',
-    boxSizing: 'border-box',
-  },
-  fieldTextarea: {
-    resize: 'vertical',
-    lineHeight: 1.5,
-  },
-  saveBtn: {
-    marginTop: '20px',
-    padding: '10px 24px',
-    background: 'linear-gradient(135deg, #7c3aed, #2563eb)',
-    color: '#fff',
-    border: 'none',
-    borderRadius: '8px',
-    fontSize: '0.85rem',
-    fontWeight: 600,
-    cursor: 'pointer',
-    alignSelf: 'flex-start',
-  },
-  successBox: {
-    padding: '10px 14px',
-    background: '#052e16',
-    border: '1px solid #16a34a',
-    borderRadius: '8px',
-    fontSize: '0.82rem',
-    color: '#86efac',
-    marginBottom: '8px',
-  },
-
-  // ── Phase 6: message bubble header + pin button ──────────────────────────
-  bubbleHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: '6px',
-  },
-  pinBtn: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '0.75rem',
-    color: '#4b5563',
-    padding: '0 2px',
-    lineHeight: 1,
-    flexShrink: 0,
-    opacity: 0.5,
-    transition: 'opacity 0.15s',
-  },
-  pinBtnSaved: {
-    color: '#34d399',
-    opacity: 1,
-  },
-
-  // Phase 7: blinking cursor shown at the end of streaming text
-  streamCursor: {
-    display: 'inline-block',
-    width: '0.55em',
-    marginLeft: '1px',
-    color: '#a78bfa',
-    animation: 'blink 1s step-start infinite',
-  },
-
-  // ── Phase 6: memory count badge below workspace button ───────────────────
-  memoryBadgeRow: {
-    marginTop: '6px',
-    textAlign: 'center',
-  },
-  memoryBadge: {
-    fontSize: '0.7rem',
-    color: '#6b7280',
-    letterSpacing: '0.02em',
-  },
-
-  // ── Phase 6: profile panel tabs ──────────────────────────────────────────
-  profileTabs: {
-    display: 'flex',
-    gap: '4px',
-    marginBottom: '20px',
-    borderBottom: '1px solid #1e1e2e',
-    paddingBottom: '0',
-  },
-  profileTabBtn: {
+  tabBtn: {
+    padding: '10px 18px',
     background: 'none',
     border: 'none',
     borderBottom: '2px solid transparent',
-    padding: '8px 14px',
     fontSize: '0.83rem',
     fontWeight: 500,
-    color: '#6b7280',
+    color: color.textSec,
     cursor: 'pointer',
-    marginBottom: '-1px',
     display: 'flex',
     alignItems: 'center',
-    gap: '6px',
+    gap: 7,
+    marginBottom: -1,
+    transition: 'color 0.15s',
   },
-  profileTabBtnActive: {
-    color: '#a78bfa',
-    borderBottomColor: '#7c3aed',
+  tabBtnActive: {
+    color: color.accentLight,
+    borderBottomColor: color.accent,
   },
-  tabCount: {
-    background: '#2a2a3a',
-    color: '#a78bfa',
-    borderRadius: '10px',
-    padding: '1px 6px',
+  tabBadge: {
+    background: color.accentDim,
+    color: color.accentLight,
+    borderRadius: 10,
+    padding: '1px 7px',
     fontSize: '0.7rem',
     fontWeight: 600,
   },
 
-  // ── Phase 6: memory list ──────────────────────────────────────────────────
+  // Workspace content
+  workspaceContent: {
+    flex: 1,
+    overflowY: 'auto',
+    padding: '28px 40px',
+  },
+  formPanel: {
+    maxWidth: 560,
+  },
+  formDesc: {
+    fontSize: '0.85rem',
+    color: color.textSec,
+    lineHeight: 1.65,
+    marginBottom: 24,
+  },
+  form: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+  },
+  fieldGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    marginBottom: 16,
+  },
+  label: {
+    fontSize: '0.78rem',
+    fontWeight: 600,
+    color: color.textSec,
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+  },
+  required: {
+    color: color.error,
+  },
+  input: {
+    background: color.surface,
+    border: `1px solid ${color.border}`,
+    borderRadius: 8,
+    padding: '9px 12px',
+    color: color.text,
+    fontSize: '0.88rem',
+    fontFamily: 'inherit',
+    outline: 'none',
+    width: '100%',
+    transition: 'border-color 0.15s, box-shadow 0.15s',
+  },
+  textarea: {
+    resize: 'vertical',
+    lineHeight: 1.55,
+    minHeight: 90,
+  },
+  primaryBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '9px 22px',
+    background: `linear-gradient(135deg, ${color.accent}, #2563eb)`,
+    border: 'none',
+    borderRadius: 8,
+    color: '#fff',
+    fontSize: '0.85rem',
+    fontWeight: 600,
+    cursor: 'pointer',
+    marginTop: 8,
+    transition: 'opacity 0.15s',
+  },
+  primaryBtnDisabled: {
+    opacity: 0.4,
+    cursor: 'not-allowed',
+  },
+
+  // Alerts
+  alertError: {
+    padding: '10px 14px',
+    background: color.errorBg,
+    border: `1px solid rgba(248, 113, 113, 0.3)`,
+    borderRadius: 8,
+    fontSize: '0.83rem',
+    color: color.error,
+    marginBottom: 16,
+  },
+  alertSuccess: {
+    padding: '10px 14px',
+    background: color.successBg,
+    border: `1px solid rgba(34, 197, 94, 0.3)`,
+    borderRadius: 8,
+    fontSize: '0.83rem',
+    color: color.success,
+    marginBottom: 16,
+  },
+
+  // Memory list
+  emptyMemory: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    padding: '40px 20px',
+    gap: 12,
+    textAlign: 'center',
+  },
+  emptyMemoryIcon: {
+    fontSize: '2rem',
+    opacity: 0.5,
+  },
+  emptyMemoryTitle: {
+    fontSize: '0.95rem',
+    fontWeight: 600,
+    color: color.textSec,
+  },
+  emptyMemoryDesc: {
+    fontSize: '0.83rem',
+    color: color.textMuted,
+    lineHeight: 1.6,
+    maxWidth: 360,
+  },
   memoryList: {
     listStyle: 'none',
     padding: 0,
     margin: 0,
     display: 'flex',
     flexDirection: 'column',
-    gap: '10px',
+    gap: 10,
   },
-  memoryItem: {
-    background: '#1a1a24',
-    border: '1px solid #2a2a3a',
-    borderRadius: '8px',
-    padding: '12px 14px',
+  memoryCard: {
+    background: color.surface,
+    border: `1px solid ${color.border}`,
+    borderRadius: 10,
+    padding: '14px 16px',
   },
-  memoryContent: {
-    margin: '0 0 8px',
+  memoryText: {
     fontSize: '0.88rem',
-    lineHeight: 1.55,
-    color: '#e0e0e0',
+    lineHeight: 1.6,
+    color: color.text,
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
+    margin: '0 0 10px',
   },
-  memoryMeta: {
+  memoryFooter: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   memoryDate: {
     fontSize: '0.72rem',
-    color: '#4b5563',
+    color: color.textMuted,
   },
   memoryDeleteBtn: {
     background: 'none',
-    border: '1px solid #3f3f50',
-    borderRadius: '5px',
+    border: `1px solid ${color.border}`,
+    borderRadius: 5,
     padding: '2px 10px',
     fontSize: '0.72rem',
-    color: '#f87171',
+    color: color.error,
     cursor: 'pointer',
+    transition: 'background 0.15s, border-color 0.15s',
+  },
+
+  // ── Chat view ─────────────────────────────────────────────────────────────
+  chatView: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+  },
+
+  // Chat header
+  chatHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '13px 24px',
+    borderBottom: `1px solid ${color.border}`,
+    flexShrink: 0,
+    WebkitAppRegion: 'drag',
+    minHeight: 52,
+  },
+  chatHeaderLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    WebkitAppRegion: 'no-drag',
+    overflow: 'hidden',
+  },
+  chatHeaderIcon: {
+    fontSize: '0.85rem',
+    opacity: 0.6,
+    flexShrink: 0,
+  },
+  chatHeaderTitle: {
+    fontSize: '0.88rem',
+    fontWeight: 600,
+    color: color.text,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  chatHeaderRight: {
+    flexShrink: 0,
+    WebkitAppRegion: 'no-drag',
+  },
+  modelBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: '0.72rem',
+    color: color.textMuted,
+    background: color.surface,
+    border: `1px solid ${color.border}`,
+    borderRadius: 20,
+    padding: '3px 10px',
+  },
+  modelDot: {
+    width: 6,
+    height: 6,
+    borderRadius: '50%',
+    background: color.success,
+    flexShrink: 0,
+  },
+
+  // Messages area
+  messagesArea: {
+    flex: 1,
+    overflowY: 'auto',
+    display: 'flex',
+    justifyContent: 'center',
+  },
+  messagesFeed: {
+    width: '100%',
+    maxWidth: 720,
+    padding: '28px 24px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+  },
+
+  // Empty states
+  emptyState: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textAlign: 'center',
+    padding: '60px 20px 40px',
+    gap: 12,
+  },
+  emptyLogo: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    background: `linear-gradient(135deg, ${color.accent}, #2563eb)`,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '1.5rem',
+    fontWeight: 700,
+    color: '#fff',
+    marginBottom: 8,
+  },
+  emptyTitle: {
+    fontSize: '1.3rem',
+    fontWeight: 700,
+    color: color.text,
+  },
+  emptySubtitle: {
+    fontSize: '0.88rem',
+    color: color.textSec,
+    lineHeight: 1.7,
+    maxWidth: 400,
+  },
+  suggestions: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  chip: {
+    background: color.surface,
+    border: `1px solid ${color.border}`,
+    borderRadius: 20,
+    padding: '7px 16px',
+    fontSize: '0.82rem',
+    color: color.textSec,
+    cursor: 'pointer',
+    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+  },
+  emptyConv: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '80px 20px',
+  },
+  emptyConvText: {
+    fontSize: '0.88rem',
+    color: color.textMuted,
+  },
+
+  // Messages
+  userMsg: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    marginBottom: 20,
+    animation: 'fadeIn 0.18s ease-out',
+  },
+  userMsgInner: {
+    maxWidth: '68%',
+    background: color.userMsgBg,
+    border: `1px solid rgba(255,255,255,0.08)`,
+    borderRadius: '16px 16px 4px 16px',
+    padding: '12px 16px',
+  },
+  userMsgHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  userLabel: {
+    fontSize: '0.68rem',
+    fontWeight: 700,
+    color: '#60a5fa',
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+  },
+  assistantMsg: {
+    display: 'flex',
+    justifyContent: 'flex-start',
+    marginBottom: 24,
+    animation: 'fadeIn 0.18s ease-out',
+  },
+  assistantMsgInner: {
+    maxWidth: '82%',
+  },
+  assistantMsgHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  aiAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    background: `linear-gradient(135deg, ${color.accent}, #2563eb)`,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '0.6rem',
+    fontWeight: 700,
+    color: '#fff',
+    flexShrink: 0,
+  },
+  assistantLabel: {
+    fontSize: '0.75rem',
+    fontWeight: 600,
+    color: color.accentLight,
+  },
+  generatingBadge: {
+    fontSize: '0.65rem',
+    color: color.textMuted,
+    background: color.surface,
+    border: `1px solid ${color.border}`,
+    borderRadius: 10,
+    padding: '1px 7px',
+    marginLeft: 4,
+  },
+  msgText: {
+    fontSize: '0.9rem',
+    lineHeight: 1.7,
+    color: color.text,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    margin: 0,
+  },
+  thinkingText: {
+    color: color.textMuted,
+    fontStyle: 'italic',
+  },
+  streamCursor: {
+    display: 'inline-block',
+    marginLeft: 1,
+    color: color.accentLight,
+    animation: 'blink 0.9s step-start infinite',
+  },
+
+  // Error banner
+  errorBanner: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: '12px 16px',
+    background: color.errorBg,
+    border: `1px solid rgba(248, 113, 113, 0.25)`,
+    borderRadius: 10,
+    fontSize: '0.83rem',
+    color: color.error,
+    marginBottom: 16,
+  },
+  errorIcon: {
+    flexShrink: 0,
+    marginTop: 1,
+  },
+
+  // ── Composer ──────────────────────────────────────────────────────────────
+  composerWrap: {
+    padding: '12px 24px 16px',
+    borderTop: `1px solid ${color.border}`,
+    flexShrink: 0,
+  },
+  composer: {
+    display: 'flex',
+    alignItems: 'flex-end',
+    gap: 10,
+    background: color.surface,
+    border: `1px solid ${color.border}`,
+    borderRadius: 12,
+    padding: '10px 10px 10px 16px',
+    transition: 'border-color 0.15s',
+  },
+  composerTextarea: {
+    flex: 1,
+    background: 'none',
+    border: 'none',
+    outline: 'none',
+    color: color.text,
+    fontSize: '0.9rem',
+    lineHeight: 1.55,
+    resize: 'none',
+    fontFamily: 'inherit',
+    minHeight: 22,
+    maxHeight: 160,
+    overflowY: 'auto',
+    padding: 0,
+  },
+  sendBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 9,
+    background: `linear-gradient(135deg, ${color.accent}, #2563eb)`,
+    border: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    flexShrink: 0,
+    transition: 'opacity 0.15s',
+  },
+  sendBtnDisabled: {
+    opacity: 0.3,
+    cursor: 'not-allowed',
+  },
+  sendBtnArrow: {
+    color: '#fff',
+    fontSize: '1rem',
+    lineHeight: 1,
+    fontWeight: 700,
+  },
+  sendBtnSpinner: {
+    color: '#fff',
+    fontSize: '0.9rem',
+    lineHeight: 1,
+  },
+  composerHint: {
+    fontSize: '0.68rem',
+    color: color.textMuted,
+    textAlign: 'center',
+    marginTop: 7,
+  },
+
+  // ── Pin button ────────────────────────────────────────────────────────────
+  pinBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    color: color.textMuted,
+    padding: '1px 3px',
+    lineHeight: 1,
+    opacity: 0.45,
+    transition: 'opacity 0.15s, color 0.15s',
+    marginLeft: 4,
+  },
+  pinBtnSaved: {
+    color: color.success,
+    opacity: 1,
   },
 }

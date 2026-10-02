@@ -29,6 +29,13 @@ const INVOKE_CHANNELS = [
   'conversation:list',
   'conversation:messages',
   'conversation:delete',
+  // Business Profile (Phase 5)
+  'profile:get',
+  'profile:save',
+  // Memories (Phase 5)
+  'memory:create',
+  'memory:list',
+  'memory:delete',
 ]
 
 /**

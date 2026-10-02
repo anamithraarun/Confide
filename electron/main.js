@@ -118,6 +118,129 @@ ipcMain.handle('conversation:delete', (_event, { conversationId } = {}) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// IPC — Business Profile (Phase 5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * profile:get
+ * Args: none
+ * Returns: { profile } | { profile: null } | { error }
+ */
+ipcMain.handle('profile:get', () => {
+  try {
+    const profile = db.getProfile()
+    return { profile }
+  } catch (err) {
+    console.error('[ipc] profile:get error:', err)
+    return { error: err.message }
+  }
+})
+
+/**
+ * profile:save
+ * Args: { businessName, industry, description, targetCustomers, budget }
+ * Returns: { profile } | { error }
+ *
+ * All fields are optional strings. businessName is required to be non-empty.
+ */
+ipcMain.handle('profile:save', (_event, args = {}) => {
+  try {
+    const { businessName, industry, description, targetCustomers, budget } = args
+
+    if (!businessName || typeof businessName !== 'string' || businessName.trim() === '') {
+      return { error: 'Business name is required.' }
+    }
+
+    const profile = db.saveProfile({
+      businessName: businessName.trim(),
+      industry:        (industry        ?? '').trim(),
+      description:     (description     ?? '').trim(),
+      targetCustomers: (targetCustomers ?? '').trim(),
+      budget:          (budget          ?? '').trim(),
+    })
+    return { profile }
+  } catch (err) {
+    console.error('[ipc] profile:save error:', err)
+    return { error: err.message }
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC — Memories (Phase 5)
+//
+// All handlers use db.BUSINESS_ID_DEFAULT as the workspace identifier.
+//
+// Multi-workspace migration path:
+//   When a user can switch between workspaces, replace db.BUSINESS_ID_DEFAULT
+//   here with the active workspace's businesses.id (e.g. resolved from a
+//   session or user-preference store).  The db.createMemory / db.getMemories /
+//   db.deleteMemory signatures stay unchanged — only the value passed as
+//   businessId changes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * memory:create
+ * Args: { content: string, source?: string }
+ * Returns: { memory, duplicate: boolean } | { error }
+ *
+ * content   — the text to remember (required, non-empty).
+ * source    — provenance tag: 'user' | 'chat' | 'document' (default 'user').
+ * duplicate — true when the content already exists; the existing row is
+ *             returned so the UI can show "already saved" without a new insert.
+ */
+ipcMain.handle('memory:create', (_event, args = {}) => {
+  try {
+    const { content, source = 'user' } = args
+
+    if (!content || typeof content !== 'string' || content.trim() === '') {
+      return { error: 'content is required.' }
+    }
+
+    const result = db.createMemory({
+      businessId: db.BUSINESS_ID_DEFAULT,
+      content: content.trim(),
+      source,
+    })
+    // result = { memory, duplicate }
+    return result
+  } catch (err) {
+    console.error('[ipc] memory:create error:', err)
+    return { error: err.message }
+  }
+})
+
+/**
+ * memory:list
+ * Args: none
+ * Returns: { memories: [] } | { error }
+ */
+ipcMain.handle('memory:list', () => {
+  try {
+    const memories = db.getMemories(db.BUSINESS_ID_DEFAULT)  // MVP: default workspace
+    return { memories }
+  } catch (err) {
+    console.error('[ipc] memory:list error:', err)
+    return { error: err.message }
+  }
+})
+
+/**
+ * memory:delete
+ * Args: { memoryId: string }
+ * Returns: { deleted: boolean } | { error }
+ */
+ipcMain.handle('memory:delete', (_event, { memoryId } = {}) => {
+  try {
+    if (!memoryId) return { error: 'memoryId is required.' }
+    const result = db.deleteMemory(memoryId)
+    return result
+  } catch (err) {
+    console.error('[ipc] memory:delete error:', err)
+    return { error: err.message }
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IPC — Ollama (with SQLite persistence & conversation context)
 // ─────────────────────────────────────────────────────────────────────────────
 const OLLAMA_BASE = 'http://127.0.0.1:11434'
@@ -126,8 +249,63 @@ const OLLAMA_MODEL = 'gemma3:1b'
 // Maximum number of prior messages sent as context (easy to configure or tune)
 const MAX_CONTEXT_MESSAGES = 20
 
-// System prompt guiding the local model to reference previous conversation context
-const SYSTEM_PROMPT = 'You are Confide, a helpful, private local AI assistant. Always carefully read and use the conversation history to answer questions about what the user told you.'
+// Maximum number of saved business memories injected into the system prompt.
+// Keep this small — gemma3:1b has a limited context window.
+// 10 memories × ~50 tokens avg = ~500 token overhead, well within budget.
+const MAX_MEMORIES = 10
+
+// Base system prompt — always included
+const SYSTEM_PROMPT_BASE = 'You are Confide, a helpful, private local AI assistant for entrepreneurs and business owners. Always carefully read and use the conversation history to answer questions about what the user told you.'
+
+/**
+ * buildSystemContent(profile, memories) → string
+ *
+ * Assembles the full system message from:
+ *   1. Base instructions (always present)
+ *   2. BUSINESS PROFILE section (when a profile with a name exists)
+ *   3. BUSINESS MEMORY section (when there are saved memories)
+ *
+ * Each section is clearly labelled so the model can distinguish structured
+ * context from live conversation history.
+ *
+ * Prompt design notes for gemma3:1b:
+ *   - Keep instructions short and action-oriented. Long "do not" lists cause
+ *     the model to refuse or produce empty responses on simple statements.
+ *   - Acknowledge declarative user messages naturally ("Got it", "Understood").
+ *   - Only reference memory/profile when the question is relevant to them.
+ */
+function buildSystemContent(profile, memories) {
+  const lines = [SYSTEM_PROMPT_BASE]
+
+  // ── Business Profile ────────────────────────────────────────────────────
+  if (profile && profile.business_name) {
+    lines.push('', 'BUSINESS PROFILE:')
+    if (profile.business_name)    lines.push(`Business name: ${profile.business_name}`)
+    if (profile.industry)         lines.push(`Industry: ${profile.industry}`)
+    if (profile.description)      lines.push(`Description: ${profile.description}`)
+    if (profile.target_customers) lines.push(`Target customers: ${profile.target_customers}`)
+    if (profile.budget)           lines.push(`Budget: ${profile.budget}`)
+  }
+
+  // ── Business Memory ─────────────────────────────────────────────────────
+  if (memories && memories.length > 0) {
+    lines.push('', 'BUSINESS MEMORY (facts saved from previous conversations):')
+    memories.forEach(m => lines.push(`- ${m.content}`))
+  }
+
+  // ── Behavioural instructions ─────────────────────────────────────────────
+  // Keep these brief — gemma3:1b performs better with short, positive guidance
+  // than with long lists of prohibitions.
+  lines.push(
+    '',
+    'Guidelines:',
+    '- When the user states a fact or shares information, acknowledge it naturally.',
+    '- When answering questions, draw on the business profile and saved memories above when relevant.',
+    '- If you do not have enough information to answer, say so honestly.',
+  )
+
+  return lines.join('\n')
+}
 
 /**
  * ollama:chat
@@ -136,12 +314,14 @@ const SYSTEM_PROMPT = 'You are Confide, a helpful, private local AI assistant. A
  * Flow:
  *   1. Validate inputs
  *   2. Verify the conversation exists in SQLite
- *   3. Retrieve prior messages from SQLite (up to MAX_CONTEXT_MESSAGES)
- *   4. Save the new user message to SQLite
- *   5. Build conversation context messages array [system, ...history, user]
- *   6. Send context to Ollama /api/chat
- *   7. Save the assistant response to SQLite
- *   8. Return both saved messages
+ *   3. Retrieve business profile  — for system prompt BUSINESS PROFILE section
+ *   4. Retrieve saved memories    — for system prompt BUSINESS MEMORY section (Phase 6)
+ *   5. Retrieve prior messages    — current conversation context
+ *   6. Save the new user message to SQLite
+ *   7. Build Ollama payload: [system(profile+memories), ...history, user]
+ *   8. POST to Ollama /api/chat
+ *   9. Save assistant response to SQLite
+ *  10. Return both saved messages
  *
  * Returns: { userMessage, assistantMessage } | { error }
  */
@@ -156,6 +336,24 @@ ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) =>
   if (!conv) return { error: `Conversation "${conversationId}" not found.` }
 
   const trimmedPrompt = prompt.trim()
+
+  // ── Retrieve business profile ────────────────────────────────────────────
+  let profile = null
+  try {
+    profile = db.getProfile()
+  } catch (err) {
+    console.warn('[ipc] ollama:chat — failed to retrieve business profile:', err)
+    // Non-fatal: chat continues without profile context
+  }
+
+  // ── Retrieve saved business memories (Phase 6) ───────────────────────────
+  let memories = []
+  try {
+    memories = db.getRecentMemories(db.BUSINESS_ID_DEFAULT, MAX_MEMORIES)
+  } catch (err) {
+    console.warn('[ipc] ollama:chat — failed to retrieve memories:', err)
+    // Non-fatal: chat continues without memory context
+  }
 
   // ── Retrieve conversation history before saving the new prompt ───────────
   let previousMessages = []
@@ -180,8 +378,13 @@ ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) =>
   }
 
   // ── Build context payload for Ollama /api/chat ──────────────────────────
+  // One structured system message contains: base instructions + business
+  // profile + business memory.  Conversation history follows as normal
+  // user/assistant turns so the model sees a clean turn structure.
+  const systemContent = buildSystemContent(profile, memories)
+
   const messagesPayload = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemContent },
     ...previousMessages.map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.content,
@@ -215,6 +418,13 @@ ipcMain.handle('ollama:chat', async (_event, { conversationId, prompt } = {}) =>
 
     const data = await res.json()
     ollamaResponse = data.message?.content ?? ''
+
+    // Guard: an empty response is treated as a failure so the user sees an
+    // error rather than a silent blank bubble.  This can happen when a very
+    // small model (gemma3:1b) is overwhelmed by a long system prompt.
+    if (ollamaResponse.trim() === '') {
+      return { error: 'Ollama returned an empty response. Try rephrasing your message.' }
+    }
   } catch (err) {
     if (err.cause?.code === 'ECONNREFUSED' || err.message?.includes('ECONNREFUSED')) {
       return { error: 'Ollama is not running. Start it with: ollama serve' }

@@ -1,0 +1,31 @@
+{
+  "name": "confide",
+  "version": "0.1.0",
+  "description": "Private, local AI chatbot desktop application",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,yellow \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.0.1",
+    "wait-on": "^8.0.1"
+  }
+}

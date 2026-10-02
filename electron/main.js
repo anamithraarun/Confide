@@ -302,6 +302,7 @@ function buildSystemContent(profile, memories) {
     '- When the user states a fact or shares information, acknowledge it naturally.',
     '- When answering questions, draw on the business profile and saved memories above when relevant.',
     '- If you do not have enough information to answer, say so honestly.',
+    '- Format responses using Markdown when helpful: use headings, bullet points, numbered lists, bold, or code blocks to improve readability. Keep responses concise and easy to scan.',
   )
 
   return lines.join('\n')

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import ReactMarkdown from 'react-markdown'
 
 /**
  * App — Phase 8: UI Redesign & Polish
@@ -698,17 +699,17 @@ export default function App() {
                           <span style={s.userLabel}>You</span>
                           {msg.id !== '__optimistic__' && <PinButton msg={msg} />}
                         </div>
-                        <p style={s.msgText}>{msg.content}</p>
+                        <p style={s.userMsgText}>{msg.content}</p>
                       </div>
                     ) : (
-                      /* Assistant message */
+                      /* Assistant message — Markdown rendered */
                       <div style={s.assistantMsgInner}>
                         <div style={s.assistantMsgHeader}>
                           <div style={s.aiAvatar}>AI</div>
                           <span style={s.assistantLabel}>Confide</span>
                           {msg.id !== '__optimistic__' && <PinButton msg={msg} />}
                         </div>
-                        <p style={s.msgText}>{msg.content}</p>
+                        <ReactMarkdown className="md-body">{msg.content}</ReactMarkdown>
                       </div>
                     )}
                   </div>
@@ -725,14 +726,17 @@ export default function App() {
                           <span style={s.generatingBadge}>generating</span>
                         )}
                       </div>
-                      <p style={s.msgText}>
-                        {streamingContent || (
-                          <span style={s.thinkingText}>Thinking…</span>
-                        )}
-                        {streamingContent && (
+                      {streamingContent ? (
+                        /* Live Markdown render of accumulated stream */
+                        <div style={s.streamingBody}>
+                          <ReactMarkdown className="md-body">{streamingContent}</ReactMarkdown>
+                          {/* Cursor sits outside the Markdown tree so it never
+                              accidentally land inside a code block or list item */}
                           <span style={s.streamCursor}>▋</span>
-                        )}
-                      </p>
+                        </div>
+                      ) : (
+                        <p style={s.thinkingText}>Thinking…</p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1516,6 +1520,16 @@ const s = {
     padding: '1px 7px',
     marginLeft: 4,
   },
+  // User messages — plain text, preserve whitespace
+  userMsgText: {
+    fontSize: '0.9rem',
+    lineHeight: 1.7,
+    color: color.text,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    margin: 0,
+  },
+  // Kept as alias used elsewhere (error text etc.)
   msgText: {
     fontSize: '0.9rem',
     lineHeight: 1.7,
@@ -1525,14 +1539,23 @@ const s = {
     margin: 0,
   },
   thinkingText: {
+    fontSize: '0.9rem',
     color: color.textMuted,
     fontStyle: 'italic',
+    margin: 0,
+  },
+  // Wrapper div so the cursor sits outside the ReactMarkdown tree
+  streamingBody: {
+    display: 'block',
   },
   streamCursor: {
     display: 'inline-block',
-    marginLeft: 1,
+    marginLeft: 2,
+    verticalAlign: 'baseline',
     color: color.accentLight,
     animation: 'blink 0.9s step-start infinite',
+    fontSize: '0.9rem',
+    lineHeight: 1,
   },
 
   // Error banner

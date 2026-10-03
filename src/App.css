@@ -72,12 +72,18 @@ body {
 .conv-item:hover {
   background: rgba(255, 255, 255, 0.04) !important;
 }
-.conv-item:hover .conv-delete {
+.conv-item:hover .conv-delete,
+.conv-item:hover .conv-rename {
   opacity: 1 !important;
 }
-.conv-item .conv-delete {
+.conv-item .conv-delete,
+.conv-item .conv-rename {
   opacity: 0;
   transition: opacity 0.15s;
+}
+.conv-rename:hover {
+  opacity: 1 !important;
+  color: #a78bfa !important;
 }
 
 /* ── Sidebar buttons — hover ────────────────────────────────────────────── */

@@ -35,7 +35,10 @@ function initDB(customPath) {
       currentDbPath = path.join(app.getPath('userData'), 'confide.db')
     } catch {
       // Fallback if app is not yet ready or in test environment
-      currentDbPath = path.join(process.env.HOME || '', 'Library', 'Application Support', 'confide', 'confide.db')
+      const baseDir = process.env.APPDATA || (process.platform === 'darwin'
+        ? path.join(process.env.HOME || '', 'Library', 'Application Support')
+        : path.join(process.env.HOME || '', '.config'))
+      currentDbPath = path.join(baseDir, 'confide', 'confide.db')
     }
   }
 
@@ -55,6 +58,7 @@ function initDB(customPath) {
     CREATE TABLE IF NOT EXISTS conversations (
       id          TEXT PRIMARY KEY,
       title       TEXT NOT NULL DEFAULT 'New Conversation',
+      auto_titled INTEGER NOT NULL DEFAULT 0,
       created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
@@ -116,6 +120,15 @@ function initDB(customPath) {
       ON memories(business_id, created_at);
   `)
 
+  // ── Schema migrations ────────────────────────────────────────────────────
+  const conversationCols = db.prepare(`PRAGMA table_info(conversations)`).all()
+  const hasAutoTitled = conversationCols.some(c => c.name === 'auto_titled')
+  if (!hasAutoTitled) {
+    // Existing conversations created before this feature default to auto_titled = 1
+    // so they do not receive automatic titles
+    db.exec(`ALTER TABLE conversations ADD COLUMN auto_titled INTEGER NOT NULL DEFAULT 1`)
+  }
+
   console.log(`[db] Opened database at: ${currentDbPath}`)
   return currentDbPath
 }
@@ -147,7 +160,7 @@ function createConversation(title = 'New Conversation') {
   const id = makeId()
   const d = getDb()
   d.prepare(`
-    INSERT INTO conversations (id, title) VALUES (?, ?)
+    INSERT INTO conversations (id, title, auto_titled) VALUES (?, ?, 0)
   `).run(id, String(title).trim() || 'New Conversation')
 
   return d.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id)
@@ -226,6 +239,33 @@ function saveMessage({ conversationId, role, content }) {
 function deleteConversation(id) {
   const result = getDb().prepare(`DELETE FROM conversations WHERE id = ?`).run(id)
   return { deleted: result.changes > 0 }
+}
+
+/**
+ * updateConversationTitle(id, title, isManual) → conversation row | undefined
+ * Updates the conversation title and marks auto_titled = 1.
+ * When isManual is true (user renamed), also bumps updated_at.
+ */
+function updateConversationTitle(id, title, isManual = false) {
+  const trimmed = String(title).trim()
+  if (!trimmed) return undefined
+  const d = getDb()
+
+  if (isManual) {
+    d.prepare(`
+      UPDATE conversations
+      SET title = ?, auto_titled = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE id = ?
+    `).run(trimmed, id)
+  } else {
+    d.prepare(`
+      UPDATE conversations
+      SET title = ?, auto_titled = 1
+      WHERE id = ?
+    `).run(trimmed, id)
+  }
+
+  return d.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,6 +444,7 @@ module.exports = {
   getRecentMessages,
   saveMessage,
   deleteConversation,
+  updateConversationTitle,
   // Phase 5 — workspace identity
   BUSINESS_ID_DEFAULT,
   // Phase 5 — memories

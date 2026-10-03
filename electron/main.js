@@ -1,5 +1,10 @@
 const { app, BrowserWindow, ipcMain } = require('electron')
 const path = require('path')
+require('dotenv').config()
+
+console.log('Gemini key loaded:', !!process.env.GEMINI_API_KEY)
+const { GoogleGenAI } = require('@google/genai')
+const Groq = require('groq-sdk')
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment
@@ -113,6 +118,28 @@ ipcMain.handle('conversation:delete', (_event, { conversationId } = {}) => {
     return result
   } catch (err) {
     console.error('[ipc] conversation:delete error:', err)
+    return { error: err.message }
+  }
+})
+
+/**
+ * conversation:rename
+ * Args: { conversationId: string, title: string }
+ * Returns: { conversation } | { error }
+ */
+ipcMain.handle('conversation:rename', (_event, { conversationId, title } = {}) => {
+  try {
+    if (!conversationId) return { error: 'conversationId is required.' }
+    if (!title || typeof title !== 'string' || title.trim() === '') {
+      return { error: 'Title cannot be empty.' }
+    }
+    const conv = db.getConversation(conversationId)
+    if (!conv) return { error: `Conversation "${conversationId}" not found.` }
+
+    const updated = db.updateConversationTitle(conversationId, title.trim(), true)
+    return { conversation: updated }
+  } catch (err) {
+    console.error('[ipc] conversation:rename error:', err)
     return { error: err.message }
   }
 })
@@ -308,6 +335,103 @@ function buildSystemContent(profile, memories) {
   return lines.join('\n')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Automatic Chat Title (Local Gemma 3 1B via Ollama)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * generateTitleWithOllama(prompt) → Promise<string | null>
+ *
+ * Chat titles must ALWAYS be generated locally using the existing Gemma/Ollama setup.
+ * Calls local Gemma 3 1B via Ollama to generate a concise 3–4 word title.
+ * Do NOT send conversation content to Gemini or any other external API.
+ * Do NOT introduce another model, API, library, or service.
+ * Do NOT include business profile, memories, or extra context.
+ */
+async function generateTitleWithOllama(prompt) {
+  try {
+    const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a concise title generator. Generate a 3 to 4 word title describing the main topic of the conversation. Output ONLY the 3 to 4 word title. Do not include quotes, punctuation, numbering, bullet points, markdown, or any explanation.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        stream: false,
+        options: { temperature: 0.3 }
+      })
+    })
+
+    if (!res.ok) {
+      console.warn(`[title] Ollama title generation HTTP error: ${res.status}`)
+      return null
+    }
+
+    const data = await res.json()
+    let rawTitle = data.message?.content?.trim() || ''
+
+    // Clean up LLM output: remove quotes, markdown, prefixes, trailing dots/symbols
+    rawTitle = rawTitle
+      .replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, '')
+      .replace(/^(title|topic):\s*/i, '')
+      .replace(/[.#*`_]+$/g, '')
+      .trim()
+
+    // Clamp words to at most 4 words if model produced more
+    const words = rawTitle.split(/\s+/).filter(Boolean)
+    if (words.length > 4) {
+      rawTitle = words.slice(0, 4).join(' ')
+    }
+
+    return rawTitle || null
+  } catch (err) {
+    console.warn('[title] Could not generate title with local Ollama/Gemma:', err.message)
+    return null
+  }
+}
+
+/**
+ * maybeGenerateTitle(sender, conversationId, userPrompt)
+ *
+ * Checks if the conversation is a newly created conversation that has not been titled yet
+ * (auto_titled === 0). If eligible, generates a title using local Gemma/Ollama, updates
+ * the conversation in SQLite, and pushes 'conversation:title-updated' to the renderer.
+ *
+ * Generates the title only once per conversation.
+ * Does not overwrite manual renames.
+ */
+async function maybeGenerateTitle(sender, conversationId, userPrompt) {
+  try {
+    const conv = db.getConversation(conversationId)
+    if (!conv || conv.auto_titled !== 0) return
+
+    const title = await generateTitleWithOllama(userPrompt)
+    if (!title) return
+
+    // Double-check conversation state before saving (in case user manually renamed while generating)
+    const currentConv = db.getConversation(conversationId)
+    if (!currentConv || currentConv.auto_titled !== 0) return
+
+    db.updateConversationTitle(conversationId, title, false)
+
+    try {
+      sender.send('conversation:title-updated', { conversationId, title })
+    } catch {
+      // Sender window may be closed
+    }
+  } catch (err) {
+    console.warn('[title] Error in maybeGenerateTitle:', err)
+  }
+}
+
 /**
  * ollama:chat — Phase 7: streaming
  * Args: { conversationId: string, prompt: string }
@@ -379,6 +503,9 @@ ipcMain.handle('ollama:chat', async (event, { conversationId, prompt } = {}) => 
     console.error('[ipc] ollama:chat — failed to save user message:', err)
     return { error: `Failed to save message: ${err.message}` }
   }
+
+  // Trigger automatic title generation locally via Ollama/Gemma (runs asynchronously)
+  maybeGenerateTitle(event.sender, conversationId, trimmedPrompt)
 
   // ── Build Ollama payload ─────────────────────────────────────────────────
   const systemContent = buildSystemContent(profile, memories)
@@ -510,6 +637,129 @@ ipcMain.handle('ollama:chat', async (event, { conversationId, prompt } = {}) => 
 
   // Return to the renderer immediately with the saved user message
   return { streaming: true, userMessage }
+})
+// IPC — Groq Online Mode (with Browser Search)
+ipcMain.handle('groq:chat', async (event, { conversationId, prompt } = {}) => {
+  if (!conversationId) return { error: 'conversationId is required.' }
+
+  if (!prompt || typeof prompt !== 'string' || prompt.trim() === '') {
+    return { error: 'Prompt must be a non-empty string.' }
+  }
+
+  const conv = db.getConversation(conversationId)
+  if (!conv) {
+    return { error: `Conversation "${conversationId}" not found.` }
+  }
+
+  const apiKey = process.env.GROQ_API_KEY
+
+  if (!apiKey || apiKey.trim() === '') {
+    return {
+      error: 'Groq API key is not configured. Please add GROQ_API_KEY=your_key to your .env file and restart the application.',
+    }
+  }
+
+  const trimmedPrompt = prompt.trim()
+
+  // ── Save user message to SQLite ──────────────────────────────────────────
+  let userMessage
+
+  try {
+    userMessage = db.saveMessage({
+      conversationId,
+      role: 'user',
+      content: trimmedPrompt,
+    })
+  } catch (err) {
+    console.error('[ipc] groq:chat — failed to save user message:', err)
+    return { error: `Failed to save message: ${err.message}` }
+  }
+
+  // Chat titles must ALWAYS be generated locally using the existing Gemma/Ollama setup
+  maybeGenerateTitle(event.sender, conversationId, trimmedPrompt)
+
+  // ── Call Groq API with Browser Search ─────────────────────────────────────
+  try {
+    const groq = new Groq({
+      apiKey: apiKey.trim(),
+    })
+
+    const response = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-20b',
+      messages: [
+        {
+          role: 'user',
+          content: trimmedPrompt,
+        },
+      ],
+      tools: [
+        {
+          type: 'browser_search',
+        },
+      ],
+      tool_choice: 'required',
+      stream: true,
+    })
+
+   let responseText = ''
+
+try {
+  for await (const chunk of response) {
+    const token = chunk.choices?.[0]?.delta?.content || ''
+
+    if (token) {
+      responseText += token
+
+      event.sender.send('groq:stream', {
+        conversationId,
+        chunk: token,
+      })
+    }
+  }
+} catch (streamErr) {
+  console.error('[ipc] groq:chat — streaming error:', streamErr)
+
+  event.sender.send('groq:stream', {
+    conversationId,
+    done: true,
+    error: streamErr.message,
+  })
+
+  return { error: `Groq streaming error: ${streamErr.message}` }
+}
+
+if (!responseText.trim()) {
+  event.sender.send('groq:stream', {
+    conversationId,
+    done: true,
+  })
+
+  return { error: 'Groq returned an empty response.' }
+}
+
+// Save the complete assistant response after streaming finishes
+const assistantMessage = db.saveMessage({
+  conversationId,
+  role: 'assistant',
+  content: responseText,
+})
+
+event.sender.send('groq:stream', {
+  conversationId,
+  done: true,
+})
+
+return {
+  userMessage,
+  assistantMessage,
+  sources: [],
+}
+
+
+  } catch (err) {
+    console.error('[ipc] groq:chat — error:', err)
+    return { error: `Groq API Error: ${err.message}` }
+  }
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

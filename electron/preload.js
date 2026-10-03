@@ -22,13 +22,18 @@ const { contextBridge, ipcRenderer } = require('electron')
  */
 const INVOKE_CHANNELS = [
   'ping',
-  // Ollama
+  // Ollama & Groq
   'ollama:chat',
+  'ollama:stream',
+  'groq:chat',
+  'groq:stream',
+
   // Conversations & messages
   'conversation:create',
   'conversation:list',
   'conversation:messages',
   'conversation:delete',
+  'conversation:rename',
   // Business Profile (Phase 5)
   'profile:get',
   'profile:save',
@@ -43,7 +48,10 @@ const INVOKE_CHANNELS = [
  * Maps to win.webContents.send() calls in main.js.
  */
 const LISTEN_CHANNELS = [
-  'ollama:stream',   // Phase 7: streaming token chunks from Ollama → renderer
+  'ollama:stream',
+  'groq:stream',
+  'conversation:title-updated',
+     // Phase 7: streaming token chunks from Ollama → renderer
 ]
 
 // ─────────────────────────────────────────────────────────────────────────────

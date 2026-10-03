@@ -41,9 +41,17 @@ export default function App() {
   const [pinState, setPinState] = useState({})   // msgId → 'idle'|'saving'|'saved'|'duplicate'
   const [memoryError, setMemoryError] = useState('')
 
+  // ── Mode state ───────────────────────────────────────────────────────────
+  const [mode, setMode] = useState('private')   // 'private' | 'online'
+
   // ── Streaming state ──────────────────────────────────────────────────────
   const [streamingContent, setStreamingContent] = useState('')
   const [streamingConvId, setStreamingConvId] = useState(null)
+
+  // ── Rename state ─────────────────────────────────────────────────────────
+  const [renamingId, setRenamingId] = useState(null)   // conv id currently being renamed
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef(null)
 
   // ── Boot ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -58,12 +66,31 @@ export default function App() {
     loadConversations()
     loadProfile()
     loadMemories()
+
+    // Listen for automatic title updates pushed from the main process
+    const unsubTitle = window.confide.on('conversation:title-updated', (data) => {
+      if (!data?.conversationId || !data?.title) return
+      setConversations(prev =>
+        prev.map(c => c.id === data.conversationId ? { ...c, title: data.title } : c)
+      )
+    })
+
+    return () => { unsubTitle() }
   }, [])
+
+  // Focus rename input when entering rename mode
+  useEffect(() => {
+    if (renamingId && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [renamingId])
 
   // ── Scroll to bottom on new messages ────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamingContent])
+
 
   // ── Data loaders ─────────────────────────────────────────────────────────
   async function loadConversations() {
@@ -117,10 +144,51 @@ export default function App() {
     const result = await window.confide.invoke('conversation:delete', { conversationId: id })
     if (result.error) { setError(result.error); return }
     if (activeId === id) { setActiveId(null); setMessages([]) }
+    if (renamingId === id) { setRenamingId(null); setRenameValue('') }
     await loadConversations()
   }
 
-  // ── Send (streaming) ─────────────────────────────────────────────────────
+  function handleRenameStart(conv, e) {
+    e.stopPropagation()
+    setRenamingId(conv.id)
+    setRenameValue(conv.title)
+  }
+
+  async function handleRenameSubmit(conversationId) {
+    const trimmed = renameValue.trim()
+    if (!trimmed) {
+      setRenamingId(null)
+      setRenameValue('')
+      return
+    }
+    const result = await window.confide.invoke('conversation:rename', {
+      conversationId,
+      title: trimmed,
+    })
+    if (result.error) {
+      setError(result.error)
+    } else if (result.conversation) {
+      // Update conversation in local state without re-fetching the full list
+      setConversations(prev =>
+        prev.map(c => c.id === conversationId ? { ...c, title: result.conversation.title } : c)
+      )
+    }
+    setRenamingId(null)
+    setRenameValue('')
+  }
+
+  function handleRenameCancel() {
+    setRenamingId(null)
+    setRenameValue('')
+  }
+
+  function handleRenameKeyDown(e, conversationId) {
+    if (e.key === 'Enter') { e.preventDefault(); handleRenameSubmit(conversationId) }
+    if (e.key === 'Escape') { handleRenameCancel() }
+  }
+
+
+  // ── Send ──────────────────────────────────────────────────────────────────
   async function handleSend() {
     const trimmed = prompt.trim()
     if (!trimmed || !activeId || loading) return
@@ -130,72 +198,140 @@ export default function App() {
     setPrompt('')
     setStreamingContent('')
     setStreamingConvId(activeId)
-
     const optimisticUser = { id: '__optimistic__', role: 'user', content: trimmed, created_at: new Date().toISOString() }
     setMessages(prev => [...prev, optimisticUser])
 
-    const unsub = window.confide.on('ollama:stream', (data) => {
-      if (data.conversationId !== activeId) return
+    // Online Mode — Groq with Browser Search
+if (mode === 'online') {
 
-      if (data.done) {
-        unsub()
-        setStreamingContent('')
-        setStreamingConvId(null)
-        setLoading(false)
+  const groqUnsub = window.confide.on('groq:stream', (data) => {
+    if (data.conversationId !== activeId) return
 
-        if (data.error) {
-          setError(data.error)
-          setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
-          return
-        }
+    if (data.done) {
+      groqUnsub()
+      setStreamingContent('')
+      setStreamingConvId(null)
+      setLoading(false)
 
-        setMessages(prev => [
-          ...prev.filter(m => m.id !== '__optimistic__'),
-          data.userMessage,
-          data.assistantMessage,
-        ])
-        loadConversations()
-      } else if (data.chunk) {
-        setStreamingContent(prev => prev + data.chunk)
-      }
-    })
-
-    try {
-      const result = await window.confide.invoke('ollama:chat', {
-        conversationId: activeId,
-        prompt: trimmed,
-      })
-
-      if (result.error) {
-        unsub()
-        setError(result.error)
-        setStreamingContent('')
-        setStreamingConvId(null)
-        setLoading(false)
+      if (data.error) {
+        setError(data.error)
         setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
         return
       }
 
-      if (result.userMessage) {
-        setMessages(prev => [
-          ...prev.filter(m => m.id !== '__optimistic__'),
-          result.userMessage,
-        ])
-      }
-    } catch (err) {
-      unsub()
-      setError(`IPC error: ${err.message}`)
+      setMessages(prev => [
+        ...prev.filter(m => m.id !== '__optimistic__'),
+        data.userMessage,
+        data.assistantMessage,
+      ])
+
+      loadConversations()
+    } else if (data.chunk) {
+      setStreamingContent(prev => prev + data.chunk)
+    }
+  })
+  try {
+    const result = await window.confide.invoke('groq:chat', {
+      conversationId: activeId,
+      prompt: trimmed,
+    })
+
+    if (result.error) {
+      groqUnsub()
+      setError(result.error)
       setStreamingContent('')
       setStreamingConvId(null)
       setLoading(false)
       setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
+      return
     }
+
+    if (result.userMessage) {
+      setMessages(prev => [
+        ...prev.filter(m => m.id !== '__optimistic__'),
+        result.userMessage,
+      ])
+    }
+  } catch (err) {
+    groqUnsub()
+    setError(`IPC error: ${err.message}`)
+    setStreamingContent('')
+    setStreamingConvId(null)
+    setLoading(false)
+    setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
   }
 
+  return
+}
+  
+    
+
+    
+   
+  // Private Mode — Ollama local streaming
+
+const unsub = window.confide.on('ollama:stream', (data) => {
+  if (data.conversationId !== activeId) return
+
+  if (data.done) {
+    unsub()
+    setStreamingContent('')
+    setStreamingConvId(null)
+    setLoading(false)
+
+    if (data.error) {
+      setError(data.error)
+      setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
+      return
+    }
+
+    setMessages(prev => [
+      ...prev.filter(m => m.id !== '__optimistic__'),
+      data.userMessage,
+      data.assistantMessage,
+    ])
+
+    loadConversations()
+  } else if (data.chunk) {
+    setStreamingContent(prev => prev + data.chunk)
+  }
+})
+
+try {
+  const result = await window.confide.invoke('ollama:chat', {
+    conversationId: activeId,
+    prompt: trimmed,
+  })
+
+  if (result.error) {
+    unsub()
+    setError(result.error)
+    setStreamingContent('')
+    setStreamingConvId(null)
+    setLoading(false)
+    setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
+    return
+  }
+
+  if (result.userMessage) {
+    setMessages(prev => [
+      ...prev.filter(m => m.id !== '__optimistic__'),
+      result.userMessage,
+    ])
+  }
+} catch (err) {
+  unsub()
+  setError(`IPC error: ${err.message}`)
+  setStreamingContent('')
+  setStreamingConvId(null)
+  setLoading(false)
+  setMessages(prev => prev.filter(m => m.id !== '__optimistic__'))
+}
+  }
   function handleKeyDown(e) {
     if (e.key === 'Enter' && e.metaKey) handleSend()
   }
-
+      
   // ── Workspace panel ───────────────────────────────────────────────────────
   function openProfile() {
     setShowProfile(true)
@@ -205,6 +341,7 @@ export default function App() {
     setProfileError('')
     setProfileSaved(false)
     setMemoryError('')
+
   }
 
   async function handleProfileSave(e) {
@@ -346,20 +483,52 @@ export default function App() {
                   ...s.convItem,
                   ...(conv.id === activeId && !showProfile ? s.convItemActive : {}),
                 }}
-                onClick={() => selectConversation(conv.id)}
-                title={conv.title}
+                onClick={() => renamingId !== conv.id && selectConversation(conv.id)}
+                title={renamingId === conv.id ? undefined : conv.title}
               >
                 <span style={s.convIcon}>💬</span>
-                <span style={s.convTitle}>{conv.title}</span>
-                <button
-                  className="conv-delete"
-                  style={s.convDelete}
-                  onClick={(e) => handleDelete(conv.id, e)}
-                  title="Delete conversation"
-                  aria-label="Delete conversation"
-                >
-                  ✕
-                </button>
+
+                {renamingId === conv.id ? (
+                  /* ── Inline rename input ──────────────────────────────── */
+                  <input
+                    ref={renameInputRef}
+                    className="conv-rename-input"
+                    style={s.convRenameInput}
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => handleRenameKeyDown(e, conv.id)}
+                    onBlur={() => handleRenameSubmit(conv.id)}
+                    onClick={e => e.stopPropagation()}
+                    maxLength={80}
+                    aria-label="Rename conversation"
+                  />
+                ) : (
+                  <span style={s.convTitle}>{conv.title}</span>
+                )}
+
+                {renamingId !== conv.id && (
+                  <>
+                    {/* ✎ rename button — shown on hover via CSS */}
+                    <button
+                      className="conv-rename"
+                      style={s.convRenameBtn}
+                      onClick={e => handleRenameStart(conv, e)}
+                      title="Rename conversation"
+                      aria-label="Rename conversation"
+                    >
+                      ✎
+                    </button>
+                    <button
+                      className="conv-delete"
+                      style={s.convDelete}
+                      onClick={(e) => handleDelete(conv.id, e)}
+                      title="Delete conversation"
+                      aria-label="Delete conversation"
+                    >
+                      ✕
+                    </button>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -412,18 +581,20 @@ export default function App() {
           </button>
         </div>
 
-        {/* ── Local status footer ───────────────────────────────────────── */}
+        {/* ── Status footer ────────────────────────────────────────────── */}
         <div style={s.statusFooter}>
           <div style={s.statusRow}>
-            <span style={s.statusIcon}>🔒</span>
-            <span style={s.statusText}>Private Mode</span>
+            <span style={s.statusIcon}>{mode === 'private' ? '🔒' : '🌐'}</span>
+            <span style={s.statusText}>{mode === 'private' ? 'Private Mode' : 'Online Mode'}</span>
           </div>
           <div style={s.statusMeta}>
-            <span>AI processing: Local</span>
+            <span>AI processing: {mode === 'private' ? 'Local' : 'Gemini + Grounding'}</span>
             <span style={s.statusDivider}>·</span>
             <span>Storage: Local</span>
           </div>
-          <div style={s.statusMeta}>Model: Gemma 3 1B</div>
+          <div style={s.statusMeta}>
+            Model: {mode === 'private' ? 'Gemma 3 1B' : 'Gemini 2.5 Flash'}
+          </div>
         </div>
 
       </aside>
@@ -639,10 +810,32 @@ export default function App() {
                 )}
               </div>
               <div style={s.chatHeaderRight}>
-                <span style={s.modelBadge}>
-                  <span style={s.modelDot} />
-                  Gemma 3 1B · local
-                </span>
+                <div style={s.modeToggleGroup}>
+                  <button
+                    className={`mode-btn${mode === 'private' ? ' mode-btn-active' : ''}`}
+                    style={{
+                      ...s.modeBtn,
+                      ...(mode === 'private' ? s.modeBtnActivePrivate : {}),
+                    }}
+                    onClick={() => setMode('private')}
+                    title="Private Mode: Local Gemma 3 1B model. 100% offline & local data."
+                  >
+                    <span style={{ ...s.modeDot, background: color.success }} />
+                    🔒 Private Mode
+                  </button>
+                  <button
+                    className={`mode-btn${mode === 'online' ? ' mode-btn-active' : ''}`}
+                    style={{
+                      ...s.modeBtn,
+                      ...(mode === 'online' ? s.modeBtnActiveOnline : {}),
+                    }}
+                    onClick={() => setMode('online')}
+                    title="Online Mode: Gemini with Google Search grounding for web information."
+                  >
+                    <span style={{ ...s.modeDot, background: '#3b82f6' }} />
+                    🌐 Online Mode
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -761,14 +954,16 @@ export default function App() {
                   style={s.composerTextarea}
                   rows={1}
                   placeholder={
-                    activeId
-                      ? 'Message Confide… (⌘↩ to send)'
-                      : 'Start a new chat to begin'
+                    !activeId
+                      ? 'Start a new chat to begin'
+                      : mode === 'private'
+                      ? 'Message Confide (Private Mode)… (⌘↩ to send)'
+                      : 'Ask general query with Online Search… (⌘↩ to send)'
                   }
                   value={prompt}
                   onChange={e => setPrompt(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  disabled={!activeId || loading}
+                  disabled={!activeId || loading }
                 />
                 <button
                   className="send-btn"
@@ -788,9 +983,16 @@ export default function App() {
                   )}
                 </button>
               </div>
-              <p style={s.composerHint}>
-                ⌘↩ to send · 📌 to save a message to Business Memory
-              </p>
+              <div style={s.composerMetaRow}>
+                <p style={s.composerHint}>
+                  ⌘↩ to send · 📌 to save a message to Business Memory
+                </p>
+                {mode === 'online' && (
+                  <span style={s.onlinePrivacyPill}>
+                    🌐 Online Mode: Business Profile & memories kept local
+                  </span>
+                )}
+              </div>
             </div>
 
           </div>
@@ -991,6 +1193,30 @@ const s = {
     borderRadius: 4,
     lineHeight: 1,
     flexShrink: 0,
+    WebkitAppRegion: 'no-drag',
+  },
+  convRenameBtn: {
+    background: 'none',
+    border: 'none',
+    color: color.textMuted,
+    cursor: 'pointer',
+    fontSize: '0.75rem',
+    padding: '2px 4px',
+    borderRadius: 4,
+    lineHeight: 1,
+    flexShrink: 0,
+    WebkitAppRegion: 'no-drag',
+  },
+  convRenameInput: {
+    flex: 1,
+    fontSize: '0.82rem',
+    color: color.text,
+    background: color.surface,
+    border: `1px solid ${color.borderFocus}`,
+    borderRadius: 4,
+    padding: '1px 5px',
+    outline: 'none',
+    minWidth: 0,
     WebkitAppRegion: 'no-drag',
   },
 
@@ -1354,22 +1580,43 @@ const s = {
     flexShrink: 0,
     WebkitAppRegion: 'no-drag',
   },
-  modelBadge: {
+  modeToggleGroup: {
     display: 'flex',
     alignItems: 'center',
-    gap: 6,
-    fontSize: '0.72rem',
-    color: color.textMuted,
     background: color.surface,
     border: `1px solid ${color.border}`,
     borderRadius: 20,
-    padding: '3px 10px',
+    padding: 2,
+    gap: 2,
   },
-  modelDot: {
+  modeBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: '0.74rem',
+    fontWeight: 500,
+    color: color.textMuted,
+    background: 'none',
+    border: 'none',
+    borderRadius: 16,
+    padding: '4px 11px',
+    cursor: 'pointer',
+    transition: 'all 0.15s ease',
+  },
+  modeBtnActivePrivate: {
+    background: 'rgba(34, 197, 94, 0.15)',
+    color: '#4ade80',
+    fontWeight: 600,
+  },
+  modeBtnActiveOnline: {
+    background: 'rgba(59, 130, 246, 0.15)',
+    color: '#60a5fa',
+    fontWeight: 600,
+  },
+  modeDot: {
     width: 6,
     height: 6,
     borderRadius: '50%',
-    background: color.success,
     flexShrink: 0,
   },
 
@@ -1638,8 +1885,24 @@ const s = {
   composerHint: {
     fontSize: '0.68rem',
     color: color.textMuted,
-    textAlign: 'center',
-    marginTop: 7,
+    margin: 0,
+  },
+  composerMetaRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  onlinePrivacyPill: {
+    fontSize: '0.68rem',
+    color: '#60a5fa',
+    background: 'rgba(59, 130, 246, 0.1)',
+    border: '1px solid rgba(59, 130, 246, 0.25)',
+    borderRadius: 12,
+    padding: '2px 8px',
+    fontWeight: 500,
   },
 
   // ── Pin button ────────────────────────────────────────────────────────────
@@ -1660,3 +1923,4 @@ const s = {
     opacity: 1,
   },
 }
+
